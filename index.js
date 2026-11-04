@@ -23,11 +23,7 @@ const dataPath = path.join(__dirname, "replies.json");
 
 function loadReplies() {
   if (!fs.existsSync(dataPath)) return {};
-  try {
-    return JSON.parse(fs.readFileSync(dataPath, "utf8"));
-  } catch {
-    return {};
-  }
+  return JSON.parse(fs.readFileSync(dataPath, "utf8"));
 }
 
 function saveReplies(data) {
@@ -82,77 +78,95 @@ client.once("ready", () => {
 client.on("interactionCreate", async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
-  const guildId = interaction.guildId;
+  try {
+    await interaction.deferReply({ ephemeral: true });
 
-  if (interaction.commandName === "ping") {
-    return interaction.reply({
-      content: "HERVIN Online ✅",
-      ephemeral: true
-    });
-  }
-
-  if (!guildId) return;
-
-  const data = loadReplies();
-  if (!data[guildId]) data[guildId] = {};
-
-  if (interaction.commandName === "addreply") {
-    const trigger = interaction.options.getString("trigger").trim();
-    const response = interaction.options.getString("response").trim();
-
-    data[guildId][trigger.toLowerCase()] = {
-      trigger,
-      response
-    };
-
-    saveReplies(data);
-
-    return interaction.reply({
-      content: `تمت إضافة الرد التلقائي بنجاح ✅\n${trigger}`,
-      ephemeral: true
-    });
-  }
-
-  if (interaction.commandName === "removereply") {
-    const trigger = interaction.options.getString("trigger").trim().toLowerCase();
-
-    if (!data[guildId][trigger]) {
-      return interaction.reply({
-        content: "الرد غير موجود",
-        ephemeral: true
-      });
+    if (interaction.commandName === "ping") {
+      return interaction.editReply("HERVIN Online ✅");
     }
 
-    delete data[guildId][trigger];
-    saveReplies(data);
+    const guildId = interaction.guildId;
 
-    return interaction.reply({
-      content: "تم حذف الرد بنجاح ✅",
-      ephemeral: true
-    });
-  }
+    if (!guildId) {
+      return interaction.editReply("هذا الأمر يعمل داخل السيرفر فقط");
+    }
 
-  if (interaction.commandName === "listreplies") {
-    const replies = Object.values(data[guildId]);
+    const data = loadReplies();
 
-    return interaction.reply({
-      content: replies.length
-        ? replies.map(r => `${r.trigger} → ${r.response}`).join("\n").slice(0, 1900)
-        : "لا توجد ردود تلقائية",
-      ephemeral: true
-    });
+    if (!data[guildId]) data[guildId] = {};
+
+    if (interaction.commandName === "addreply") {
+      const trigger = interaction.options.getString("trigger").trim();
+      const response = interaction.options.getString("response").trim();
+
+      data[guildId][trigger.toLowerCase()] = {
+        trigger,
+        response
+      };
+
+      saveReplies(data);
+
+      return interaction.editReply(
+        `تمت إضافة الرد التلقائي بنجاح ✅\n${trigger}`
+      );
+    }
+
+    if (interaction.commandName === "removereply") {
+      const trigger = interaction.options
+        .getString("trigger").trim().toLowerCase();
+
+      if (!data[guildId][trigger]) {
+        return interaction.editReply("الرد غير موجود");
+      }
+
+      delete data[guildId][trigger];
+      saveReplies(data);
+
+      return interaction.editReply("تم حذف الرد بنجاح ✅");
+    }
+
+    if (interaction.commandName === "listreplies") {
+      const replies = Object.values(data[guildId]);
+
+      return interaction.editReply(
+        replies.length
+          ? replies.map(r => `${r.trigger} → ${r.response}`)
+              .join("\n").slice(0, 1900)
+          : "لا توجد ردود تلقائية"
+      );
+    }
+
+    return interaction.editReply("الأمر غير معروف");
+  } catch (error) {
+    console.error("Interaction Error:", error);
+
+    const message = "حدث خطأ أثناء تنفيذ الأمر، راجع سجلات البوت";
+
+    try {
+      if (interaction.deferred || interaction.replied) {
+        await interaction.editReply(message);
+      } else {
+        await interaction.reply({ content: message, ephemeral: true });
+      }
+    } catch (replyError) {
+      console.error("Reply Error:", replyError);
+    }
   }
 });
 
 client.on("messageCreate", async message => {
   if (!message.guild || message.author.bot) return;
 
-  const data = loadReplies();
-  const replies = data[message.guild.id] || {};
-  const trigger = message.content.trim().toLowerCase();
+  try {
+    const data = loadReplies();
+    const replies = data[message.guild.id] || {};
+    const trigger = message.content.trim().toLowerCase();
 
-  if (replies[trigger]) {
-    await message.reply(replies[trigger].response);
+    if (replies[trigger]) {
+      await message.reply(replies[trigger].response);
+    }
+  } catch (error) {
+    console.error("Message Error:", error);
   }
 });
 
@@ -167,4 +181,6 @@ async function start() {
   await client.login(TOKEN);
 }
 
-start().catch(console.error);
+start().catch(error => {
+  console.error("Startup Error:", error);
+});
