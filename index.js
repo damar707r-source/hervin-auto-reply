@@ -19,49 +19,80 @@ if (!TOKEN || !CLIENT_ID) {
   process.exit(1);
 }
 
-const dataPath = path.join(__dirname, "replies.json");
+const file = path.join(__dirname, "replies.json");
 
-function loadReplies() {
-  if (!fs.existsSync(dataPath)) return {};
-  return JSON.parse(fs.readFileSync(dataPath, "utf8"));
+function load() {
+  try {
+    return fs.existsSync(file)
+      ? JSON.parse(fs.readFileSync(file, "utf8"))
+      : {};
+  } catch (error) {
+    console.error("Load error:", error);
+    return {};
+  }
 }
 
-function saveReplies(data) {
-  fs.writeFileSync(dataPath, JSON.stringify(data, null, 2));
+function save(data) {
+  fs.writeFileSync(file, JSON.stringify(data, null, 2));
 }
+
+const admin = PermissionFlagsBits.ManageGuild;
 
 const commands = [
   new SlashCommandBuilder()
+    .setName("help")
+    .setDescription("Show HERVIN commands"),
+
+  new SlashCommandBuilder()
     .setName("ping")
-    .setDescription("Check HERVIN status"),
+    .setDescription("Check bot status"),
 
   new SlashCommandBuilder()
     .setName("addreply")
     .setDescription("Add automatic reply")
     .addStringOption(o =>
-      o.setName("trigger")
-        .setDescription("Trigger word")
-        .setRequired(true))
+      o.setName("trigger").setDescription("Trigger word").setRequired(true))
     .addStringOption(o =>
-      o.setName("response")
-        .setDescription("Automatic response")
-        .setRequired(true))
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
-
-  new SlashCommandBuilder()
-    .setName("removereply")
-    .setDescription("Remove automatic reply")
-    .addStringOption(o =>
-      o.setName("trigger")
-        .setDescription("Trigger word")
-        .setRequired(true))
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+      o.setName("response").setDescription("Bot response").setRequired(true))
+    .setDefaultMemberPermissions(admin),
 
   new SlashCommandBuilder()
     .setName("listreplies")
-    .setDescription("List automatic replies")
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-].map(c => c.toJSON());
+    .setDescription("List all replies")
+    .setDefaultMemberPermissions(admin),
+
+  new SlashCommandBuilder()
+    .setName("removereply")
+    .setDescription("Delete a reply")
+    .addStringOption(o =>
+      o.setName("trigger").setDescription("Trigger word").setRequired(true))
+    .setDefaultMemberPermissions(admin),
+
+  new SlashCommandBuilder()
+    .setName("display")
+    .setDescription("Display reply details")
+    .addStringOption(o =>
+      o.setName("trigger").setDescription("Trigger word").setRequired(true))
+    .setDefaultMemberPermissions(admin),
+
+  new SlashCommandBuilder()
+    .setName("edit")
+    .setDescription("Edit an automatic reply")
+    .addStringOption(o =>
+      o.setName("trigger").setDescription("Existing trigger").setRequired(true))
+    .addStringOption(o =>
+      o.setName("response").setDescription("New response").setRequired(true))
+    .setDefaultMemberPermissions(admin),
+
+  new SlashCommandBuilder()
+    .setName("enabled")
+    .setDescription("Enable or disable a reply")
+    .addStringOption(o =>
+      o.setName("trigger").setDescription("Trigger word").setRequired(true))
+    .addBooleanOption(o =>
+      o.setName("status").setDescription("True = enabled, False = disabled").setRequired(true))
+    .setDefaultMemberPermissions(admin)
+].map(command => command.toJSON());
 
 const client = new Client({
   intents: [
@@ -79,68 +110,128 @@ client.on("interactionCreate", async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
   try {
+    if (interaction.commandName === "ping") {
+      return interaction.reply({
+        content: "HERVIN Online ✅",
+        ephemeral: true
+      });
+    }
+
+    if (interaction.commandName === "help") {
+      return interaction.reply({
+        content:
+          "**𝐇𝐄𝐑𝐕𝐈𝐍 Commands**\n" +
+          "`/ping` - Bot status\n" +
+          "`/addreply` - Add reply\n" +
+          "`/listreplies` - List replies\n" +
+          "`/removereply` - Delete reply\n" +
+          "`/display` - Display reply\n" +
+          "`/edit` - Edit reply\n" +
+          "`/enabled` - Enable or disable reply",
+        ephemeral: true
+      });
+    }
+
+    if (!interaction.memberPermissions?.has(admin)) {
+      return interaction.reply({
+        content: "تحتاج صلاحية Manage Server لاستخدام هذا الأمر",
+        ephemeral: true
+      });
+    }
+
     await interaction.deferReply({ ephemeral: true });
 
-    if (interaction.commandName === "ping") {
-      return interaction.editReply("HERVIN Online ✅");
-    }
-
     const guildId = interaction.guildId;
-
-    if (!guildId) {
-      return interaction.editReply("هذا الأمر يعمل داخل السيرفر فقط");
-    }
-
-    const data = loadReplies();
+    const data = load();
 
     if (!data[guildId]) data[guildId] = {};
 
-    if (interaction.commandName === "addreply") {
-      const trigger = interaction.options.getString("trigger").trim();
-      const response = interaction.options.getString("response").trim();
+    const trigger = interaction.options.getString("trigger")?.trim();
+    const key = trigger?.toLowerCase();
 
-      data[guildId][trigger.toLowerCase()] = {
-        trigger,
-        response
-      };
+    switch (interaction.commandName) {
+      case "addreply": {
+        const response = interaction.options.getString("response").trim();
 
-      saveReplies(data);
+        if (!trigger || !response) {
+          return interaction.editReply("الكلمة والرد مطلوبان");
+        }
 
-      return interaction.editReply(
-        `تمت إضافة الرد التلقائي بنجاح ✅\n${trigger}`
-      );
-    }
+        data[guildId][key] = {
+          trigger,
+          response,
+          enabled: true
+        };
 
-    if (interaction.commandName === "removereply") {
-      const trigger = interaction.options
-        .getString("trigger").trim().toLowerCase();
-
-      if (!data[guildId][trigger]) {
-        return interaction.editReply("الرد غير موجود");
+        save(data);
+        return interaction.editReply(`تمت إضافة الرد بنجاح ✅\n${trigger}`);
       }
 
-      delete data[guildId][trigger];
-      saveReplies(data);
+      case "listreplies": {
+        const replies = Object.values(data[guildId]);
 
-      return interaction.editReply("تم حذف الرد بنجاح ✅");
-    }
+        const output = replies.length
+          ? replies.map(r =>
+              `${r.enabled === false ? "🔴" : "🟢"} ${r.trigger} → ${r.response}`
+            ).join("\n")
+          : "لا توجد ردود محفوظة";
 
-    if (interaction.commandName === "listreplies") {
-      const replies = Object.values(data[guildId]);
+        return interaction.editReply(output.slice(0, 1900));
+      }
 
-      return interaction.editReply(
-        replies.length
-          ? replies.map(r => `${r.trigger} → ${r.response}`)
-              .join("\n").slice(0, 1900)
-          : "لا توجد ردود تلقائية"
-      );
+      case "removereply": {
+        if (!data[guildId][key]) {
+          return interaction.editReply("الرد غير موجود");
+        }
+
+        delete data[guildId][key];
+        save(data);
+
+        return interaction.editReply("تم حذف الرد بنجاح ✅");
+      }
+
+      case "display": {
+        const reply = data[guildId][key];
+
+        if (!reply) return interaction.editReply("الرد غير موجود");
+
+        return interaction.editReply(
+          `**الكلمة:** ${reply.trigger}\n` +
+          `**الاستجابة:** ${reply.response}\n` +
+          `**الحالة:** ${reply.enabled === false ? "معطل 🔴" : "مفعل 🟢"}`
+        );
+      }
+
+      case "edit": {
+        const reply = data[guildId][key];
+
+        if (!reply) return interaction.editReply("الرد غير موجود");
+
+        reply.response = interaction.options.getString("response").trim();
+        save(data);
+
+        return interaction.editReply("تم تعديل الاستجابة بنجاح ✅");
+      }
+
+      case "enabled": {
+        const reply = data[guildId][key];
+
+        if (!reply) return interaction.editReply("الرد غير موجود");
+
+        reply.enabled = interaction.options.getBoolean("status");
+        save(data);
+
+        return interaction.editReply(
+          reply.enabled ? "تم تفعيل الرد 🟢" : "تم تعطيل الرد 🔴"
+        );
+      }
     }
 
     return interaction.editReply("الأمر غير معروف");
   } catch (error) {
-    console.error("Interaction Error:", error);
+    console.error("Command error:", error);
 
-    const message = "حدث خطأ أثناء تنفيذ الأمر، راجع سجلات البوت";
+    const message = "حدث خطأ أثناء تنفيذ الأمر. راجع Logs.";
 
     try {
       if (interaction.deferred || interaction.replied) {
@@ -149,7 +240,7 @@ client.on("interactionCreate", async interaction => {
         await interaction.reply({ content: message, ephemeral: true });
       }
     } catch (replyError) {
-      console.error("Reply Error:", replyError);
+      console.error(replyError);
     }
   }
 });
@@ -158,15 +249,20 @@ client.on("messageCreate", async message => {
   if (!message.guild || message.author.bot) return;
 
   try {
-    const data = loadReplies();
-    const replies = data[message.guild.id] || {};
-    const trigger = message.content.trim().toLowerCase();
+    const data = load();
+    const replies = Object.values(data[message.guild.id] || {});
+    const content = message.content.toLowerCase();
 
-    if (replies[trigger]) {
-      await message.reply(replies[trigger].response);
+    const match = replies.find(reply =>
+      reply.enabled !== false &&
+      content.includes(reply.trigger.toLowerCase())
+    );
+
+    if (match) {
+      await message.reply(match.response);
     }
   } catch (error) {
-    console.error("Message Error:", error);
+    console.error("Auto reply error:", error);
   }
 });
 
@@ -181,6 +277,4 @@ async function start() {
   await client.login(TOKEN);
 }
 
-start().catch(error => {
-  console.error("Startup Error:", error);
-});
+start().catch(console.error);
