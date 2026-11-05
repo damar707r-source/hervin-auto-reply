@@ -1,10 +1,11 @@
+
 {
   "name": "hervin-discord-bot",
   "version": "1.0.0",
   "description": "HERVIN Discord Bot and Dashboard",
-  "main": "index.js",
+  "main": "server.js",
   "scripts": {
-    "start": "node index.js",
+    "start": "node server.js",
     "dashboard": "node server.js"
   },
   "engines": {
