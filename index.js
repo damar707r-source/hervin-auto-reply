@@ -10,7 +10,9 @@ const {
 
 const fs = require("fs");
 const path = require("path");
+
 const tickets = require("./systems/tickets");
+const security = require("./systems/security");
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
@@ -95,24 +97,36 @@ const commands = [
     .setDefaultMemberPermissions(admin)
 ].map(command => command.toJSON());
 
-// إضافة أوامر التذاكر
+// تسجيل أوامر التذاكر
 tickets.registerTicketCommands(commands);
+
+// تسجيل أوامر الحماية
+security.registerSecurityCommands(commands);
 
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildModeration,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent
   ]
 });
 
+// تشغيل نظام الحماية
+security.initializeSecurity(client);
+
 client.once("ready", () => {
   console.log(`HERVIN Online: ${client.user.tag}`);
 });
 
+// استقبال الأوامر والأزرار
 client.on("interactionCreate", async interaction => {
   try {
-    // معالجة أوامر وأزرار التذاكر أولاً
+    // نظام الحماية
+    if (await security.handleSecurityInteraction(interaction)) return;
+
+    // نظام التذاكر
     if (await tickets.handleTicketInteraction(interaction)) return;
 
     if (!interaction.isChatInputCommand()) return;
@@ -127,16 +141,26 @@ client.on("interactionCreate", async interaction => {
     if (interaction.commandName === "help") {
       return interaction.reply({
         content:
-          "**𝐇𝐄𝐑𝐕𝐈𝐍 Commands**\n" +
+          "**𝐇𝐄𝐑𝐕𝐈𝐍 Commands**\n\n" +
+          "**General**\n" +
           "`/ping` - Bot status\n" +
+          "`/help` - Commands list\n\n" +
+          "**Auto Replies**\n" +
           "`/addreply` - Add reply\n" +
           "`/listreplies` - List replies\n" +
           "`/removereply` - Delete reply\n" +
           "`/display` - Display reply\n" +
           "`/edit` - Edit reply\n" +
-          "`/enabled` - Enable or disable reply\n" +
+          "`/enabled` - Enable or disable reply\n\n" +
+          "**Tickets**\n" +
           "`/ticket-setup` - Setup tickets\n" +
-          "`/ticket-panel` - Send ticket panel",
+          "`/ticket-panel` - Send ticket panel\n" +
+          "`/ticket-add` - Add member\n" +
+          "`/ticket-remove` - Remove member\n" +
+          "`/ticket-transcript` - Create transcript\n\n" +
+          "**Security**\n" +
+          "`/security-setup` - Setup security\n" +
+          "`/security-status` - Security status",
         ephemeral: true
       });
     }
@@ -258,6 +282,7 @@ client.on("interactionCreate", async interaction => {
   }
 });
 
+// الردود التلقائية
 client.on("messageCreate", async message => {
   if (!message.guild || message.author.bot) return;
 
@@ -279,6 +304,7 @@ client.on("messageCreate", async message => {
   }
 });
 
+// تشغيل البوت وتسجيل الأوامر
 async function start() {
   const rest = new REST({ version: "10" }).setToken(TOKEN);
 
