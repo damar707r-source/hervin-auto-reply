@@ -13,6 +13,7 @@ const path = require("path");
 
 const tickets = require("./systems/tickets");
 const security = require("./systems/security");
+const welcome = require("./systems/welcome");
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
@@ -54,9 +55,13 @@ const commands = [
     .setName("addreply")
     .setDescription("Add automatic reply")
     .addStringOption(o =>
-      o.setName("trigger").setDescription("Trigger word").setRequired(true))
+      o.setName("trigger")
+        .setDescription("Trigger word")
+        .setRequired(true))
     .addStringOption(o =>
-      o.setName("response").setDescription("Bot response").setRequired(true))
+      o.setName("response")
+        .setDescription("Bot response")
+        .setRequired(true))
     .setDefaultMemberPermissions(admin),
 
   new SlashCommandBuilder()
@@ -68,32 +73,44 @@ const commands = [
     .setName("removereply")
     .setDescription("Delete a reply")
     .addStringOption(o =>
-      o.setName("trigger").setDescription("Trigger word").setRequired(true))
+      o.setName("trigger")
+        .setDescription("Trigger word")
+        .setRequired(true))
     .setDefaultMemberPermissions(admin),
 
   new SlashCommandBuilder()
     .setName("display")
     .setDescription("Display reply details")
     .addStringOption(o =>
-      o.setName("trigger").setDescription("Trigger word").setRequired(true))
+      o.setName("trigger")
+        .setDescription("Trigger word")
+        .setRequired(true))
     .setDefaultMemberPermissions(admin),
 
   new SlashCommandBuilder()
     .setName("edit")
     .setDescription("Edit an automatic reply")
     .addStringOption(o =>
-      o.setName("trigger").setDescription("Existing trigger").setRequired(true))
+      o.setName("trigger")
+        .setDescription("Existing trigger")
+        .setRequired(true))
     .addStringOption(o =>
-      o.setName("response").setDescription("New response").setRequired(true))
+      o.setName("response")
+        .setDescription("New response")
+        .setRequired(true))
     .setDefaultMemberPermissions(admin),
 
   new SlashCommandBuilder()
     .setName("enabled")
     .setDescription("Enable or disable a reply")
     .addStringOption(o =>
-      o.setName("trigger").setDescription("Trigger word").setRequired(true))
+      o.setName("trigger")
+        .setDescription("Trigger word")
+        .setRequired(true))
     .addBooleanOption(o =>
-      o.setName("status").setDescription("True = enabled, False = disabled").setRequired(true))
+      o.setName("status")
+        .setDescription("True = enabled, False = disabled")
+        .setRequired(true))
     .setDefaultMemberPermissions(admin)
 ].map(command => command.toJSON());
 
@@ -102,6 +119,9 @@ tickets.registerTicketCommands(commands);
 
 // تسجيل أوامر الحماية
 security.registerSecurityCommands(commands);
+
+// تسجيل أوامر الترحيب والمغادرة
+welcome.registerWelcomeCommands(commands);
 
 const client = new Client({
   intents: [
@@ -116,6 +136,9 @@ const client = new Client({
 // تشغيل نظام الحماية
 security.initializeSecurity(client);
 
+// تشغيل نظام الترحيب والمغادرة
+welcome.initializeWelcome(client);
+
 client.once("ready", () => {
   console.log(`HERVIN Online: ${client.user.tag}`);
 });
@@ -123,6 +146,9 @@ client.once("ready", () => {
 // استقبال الأوامر والأزرار
 client.on("interactionCreate", async interaction => {
   try {
+    // نظام الترحيب والمغادرة
+    if (await welcome.handleWelcomeInteraction(interaction)) return;
+
     // نظام الحماية
     if (await security.handleSecurityInteraction(interaction)) return;
 
@@ -142,9 +168,11 @@ client.on("interactionCreate", async interaction => {
       return interaction.reply({
         content:
           "**𝐇𝐄𝐑𝐕𝐈𝐍 Commands**\n\n" +
+
           "**General**\n" +
           "`/ping` - Bot status\n" +
           "`/help` - Commands list\n\n" +
+
           "**Auto Replies**\n" +
           "`/addreply` - Add reply\n" +
           "`/listreplies` - List replies\n" +
@@ -152,15 +180,23 @@ client.on("interactionCreate", async interaction => {
           "`/display` - Display reply\n" +
           "`/edit` - Edit reply\n" +
           "`/enabled` - Enable or disable reply\n\n" +
+
           "**Tickets**\n" +
           "`/ticket-setup` - Setup tickets\n" +
           "`/ticket-panel` - Send ticket panel\n" +
           "`/ticket-add` - Add member\n" +
           "`/ticket-remove` - Remove member\n" +
           "`/ticket-transcript` - Create transcript\n\n" +
+
           "**Security**\n" +
           "`/security-setup` - Setup security\n" +
-          "`/security-status` - Security status",
+          "`/security-status` - Security status\n\n" +
+
+          "**Welcome System**\n" +
+          "`/welcome-setup` - Setup welcome messages\n" +
+          "`/leave-setup` - Setup leave messages\n" +
+          "`/welcome-status` - Welcome settings",
+
         ephemeral: true
       });
     }
