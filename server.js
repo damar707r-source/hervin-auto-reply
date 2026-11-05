@@ -1,4 +1,3 @@
-
 const express = require("express");
 const crypto = require("crypto");
 
@@ -24,6 +23,15 @@ const sessions = new Map();
 const loginStates = new Map();
 
 const SESSION_MAX_AGE = 24 * 60 * 60 * 1000;
+
+// فحص المتغيرات عند تشغيل الموقع
+console.log("=================================");
+console.log("HERVIN OAUTH ENV CHECK:", {
+  CLIENT_ID: Boolean(CLIENT_ID),
+  CLIENT_SECRET: Boolean(CLIENT_SECRET),
+  SESSION_SECRET: Boolean(SESSION_SECRET)
+});
+console.log("=================================");
 
 function createSignature(value) {
   return crypto
@@ -93,6 +101,12 @@ function requireSession(req, res, next) {
 
 app.get("/auth/discord", (req, res) => {
   if (!CLIENT_ID || !CLIENT_SECRET || !SESSION_SECRET) {
+    console.log("OAuth ENV CHECK:", {
+      CLIENT_ID: Boolean(CLIENT_ID),
+      CLIENT_SECRET: Boolean(CLIENT_SECRET),
+      SESSION_SECRET: Boolean(SESSION_SECRET)
+    });
+
     return res.status(500).send(
       "إعدادات تسجيل الدخول غير مكتملة في Render"
     );
@@ -234,9 +248,7 @@ app.get("/api/me", requireSession, (req, res) => {
 
   res.json({
     loggedIn: true,
-
     user: session.user,
-
     selectedGuild: session.selectedGuild
   });
 });
@@ -489,9 +501,7 @@ font-size:18px;
 margin:12px 0 0;
 }
 
-.field{
-margin-bottom:35px;
-}
+.field{margin-bottom:35px}
 
 .field label{
 display:block;
@@ -512,9 +522,7 @@ font-size:19px;
 outline:none;
 }
 
-select option{
-background:#15112f;
-}
+select option{background:#15112f}
 
 .preview{
 background:#10142c;
@@ -668,9 +676,7 @@ text-decoration:none;
 cursor:pointer;
 }
 
-#dashboardContent{
-display:none;
-}
+#dashboardContent{display:none}
 
 #serverArea{
 background:var(--card);
@@ -686,9 +692,7 @@ margin-bottom:12px;
 color:var(--gold);
 }
 
-#serverSelect{
-width:100%;
-}
+#serverSelect{width:100%}
 
 #userArea{
 display:flex;
@@ -779,9 +783,7 @@ font-size:12px;
 }
 
 .hint{font-size:10px}
-
 .role-box{padding:8px}
-
 footer{padding:15px;font-size:10px}
 
 #loginPanel{
@@ -883,7 +885,6 @@ padding:20px;
 </div>
 
 <section class="section" id="basics">
-
 <div class="section-head">
 <div class="section-icon">⚙</div>
 <div>
@@ -902,7 +903,6 @@ padding:20px;
 
 <div class="field">
 <label>لون الامبد الافتراضي</label>
-
 <div class="preview">
 <div>
 <h3>مثال على عنوان الامبد</h3>
@@ -910,18 +910,15 @@ padding:20px;
 </div>
 <div class="preview-icon"></div>
 </div>
-
 <p class="hint">
 هذا اللون سيستخدم في جميع رسائل الامبد الافتراضية من البوت
 </p>
 </div>
 
 <button class="save">حفظ الإعدادات</button>
-
 </section>
 
 <section class="section" id="roles">
-
 <div class="section-head">
 <div class="section-icon">♟</div>
 <div>
@@ -961,7 +958,6 @@ padding:20px;
 </div>
 
 <button class="save">حفظ الإعدادات</button>
-
 </section>
 
 <section class="section" id="security">
@@ -1051,13 +1047,13 @@ padding:20px;
 
 <script>
 function toggleMenu(){
-document.getElementById("menu").classList.toggle("show");
+  document.getElementById("menu").classList.toggle("show");
 }
 
 document.querySelectorAll(".menu a").forEach(link=>{
-link.addEventListener("click",()=>{
-document.getElementById("menu").classList.remove("show");
-});
+  link.addEventListener("click",()=>{
+    document.getElementById("menu").classList.remove("show");
+  });
 });
 
 async function loadDashboard(){
@@ -1084,6 +1080,7 @@ async function loadDashboard(){
       data.user.username;
 
     await loadGuilds(data.selectedGuild?.id);
+
   } catch (error) {
     document.getElementById("loginMessage").textContent =
       "تعذر الاتصال بالخادم، حاول تحديث الصفحة";
@@ -1179,6 +1176,7 @@ async function logout(){
     });
 
     window.location.reload();
+
   } catch (error) {
     alert("تعذر تسجيل الخروج");
   }
