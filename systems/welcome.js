@@ -12,7 +12,10 @@ const configPath = path.join(__dirname, "welcome.json");
 function loadConfig() {
   try {
     if (!fs.existsSync(configPath)) return {};
-    return JSON.parse(fs.readFileSync(configPath, "utf8"));
+
+    return JSON.parse(
+      fs.readFileSync(configPath, "utf8")
+    );
   } catch (error) {
     console.error("HERVIN Welcome Load Error:", error);
     return {};
@@ -20,7 +23,10 @@ function loadConfig() {
 }
 
 function saveConfig(data) {
-  fs.writeFileSync(configPath, JSON.stringify(data, null, 2));
+  fs.writeFileSync(
+    configPath,
+    JSON.stringify(data, null, 2)
+  );
 }
 
 function registerWelcomeCommands(commands) {
@@ -35,7 +41,7 @@ function registerWelcomeCommands(commands) {
           .setRequired(true))
       .addStringOption(option =>
         option.setName("message")
-          .setDescription("Welcome message. Variables: {user}, {username}, {server}, {memberCount}")
+          .setDescription("Welcome message")
           .setMaxLength(1000)
           .setRequired(false))
       .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
@@ -51,7 +57,7 @@ function registerWelcomeCommands(commands) {
           .setRequired(true))
       .addStringOption(option =>
         option.setName("message")
-          .setDescription("Leave message. Variables: {user}, {username}, {server}, {memberCount}")
+          .setDescription("Leave message")
           .setMaxLength(1000)
           .setRequired(false))
       .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
@@ -73,7 +79,13 @@ function formatMessage(template, user, guild, memberCount) {
     .replace(/\{memberCount\}/gi, String(memberCount));
 }
 
-async function sendConfiguredMessage(guild, channelId, template, user, memberCount) {
+async function sendConfiguredMessage(
+  guild,
+  channelId,
+  template,
+  user,
+  memberCount
+) {
   if (!channelId) return;
 
   try {
@@ -82,7 +94,12 @@ async function sendConfiguredMessage(guild, channelId, template, user, memberCou
     if (!channel?.isTextBased() || !channel.send) return;
 
     await channel.send({
-      content: formatMessage(template, user, guild, memberCount),
+      content: formatMessage(
+        template,
+        user,
+        guild,
+        memberCount
+      ),
       allowedMentions: {
         parse: ["users"]
       }
@@ -91,6 +108,118 @@ async function sendConfiguredMessage(guild, channelId, template, user, memberCou
     console.error("HERVIN Welcome Send Error:", error);
   }
 }
+
+// =====================================
+// MEMBER AUTO ROLES
+// =====================================
+
+async function giveAutoRole(member, roleId, type) {
+  if (!roleId) return;
+
+  try {
+    const role = await member.guild.roles.fetch(roleId);
+
+    if (!role) {
+      console.log(`HERVIN ${type} role not found`);
+      return;
+    }
+
+    if (!member.guild.members.me) {
+      await member.guild.members.fetchMe();
+    }
+
+    const botMember = member.guild.members.me;
+
+    if (!botMember.permissions.has(
+      PermissionFlagsBits.ManageRoles
+    )) {
+      console.log("HERVIN needs Manage Roles permission");
+      return;
+    }
+
+    if (role.position >= botMember.roles.highest.position) {
+      console.log("HERVIN cannot assign a role above its highest role");
+      return;
+    }
+
+    if (role.managed || role.id === member.guild.id) return;
+
+    await member.roles.add(
+      role,
+      `HERVIN automatic ${type} role`
+    );
+
+    console.log(
+      `HERVIN assigned ${type} role to ${member.user.tag}`
+    );
+
+  } catch (error) {
+    console.error(`HERVIN ${type} Role Error:`, error);
+  }
+}
+
+// =====================================
+// JOIN / LEAVE LOGS
+// =====================================
+
+async function sendMemberLog(
+  guild,
+  channelId,
+  title,
+  member,
+  color
+) {
+  if (!channelId) return;
+
+  try {
+    const channel = await guild.channels.fetch(channelId);
+
+    if (!channel?.isTextBased() || !channel.send) return;
+
+    await channel.send({
+      embeds: [{
+        color,
+        title,
+        fields: [
+          {
+            name: "العضو",
+            value: `${member.user.tag}\n<@${member.id}>`,
+            inline: true
+          },
+          {
+            name: "معرّف العضو",
+            value: member.id,
+            inline: true
+          },
+          {
+            name: "عدد أعضاء السيرفر",
+            value: String(guild.memberCount),
+            inline: true
+          }
+        ],
+        thumbnail: {
+          url: member.user.displayAvatarURL({
+            size: 256
+          })
+        },
+        timestamp: new Date().toISOString(),
+        footer: {
+          text: "HERVIN MEMBER LOGS"
+        }
+      }],
+      allowedMentions: {
+        parse: []
+      }
+    });
+
+  } catch (error) {
+    console.error("HERVIN Member Log Error:", error);
+  }
+}
+
+// =====================================
+// COMMAND HANDLER
+// =====================================
 
 async function handleWelcomeInteraction(interaction) {
   if (!interaction.isChatInputCommand()) return false;
@@ -112,6 +241,7 @@ async function handleWelcomeInteraction(interaction) {
       content: "تحتاج صلاحية Manage Server لاستخدام هذا الأمر.",
       ephemeral: true
     });
+
     return true;
   }
 
@@ -127,6 +257,7 @@ async function handleWelcomeInteraction(interaction) {
     const message = interaction.options.getString("message");
 
     data[guildId].welcome = {
+      ...data[guildId].welcome,
       channelId: channel.id,
       message: message ||
         "أهلًا وسهلًا {user} في سيرفر {server} 🎉\nأنت العضو رقم {memberCount}"
@@ -147,6 +278,7 @@ async function handleWelcomeInteraction(interaction) {
     const message = interaction.options.getString("message");
 
     data[guildId].leave = {
+      ...data[guildId].leave,
       channelId: channel.id,
       message: message ||
         "غادرنا {username} من سيرفر {server} 👋"
@@ -173,11 +305,31 @@ async function handleWelcomeInteraction(interaction) {
       ? `<#${config.leave.channelId}>`
       : "غير مضبوط";
 
+    const memberRole = config.memberRoleId
+      ? `<@&${config.memberRoleId}>`
+      : "غير مضبوط";
+
+    const botRole = config.botRoleId
+      ? `<@&${config.botRoleId}>`
+      : "غير مضبوط";
+
+    const joinLog = config.joinLogChannelId
+      ? `<#${config.joinLogChannelId}>`
+      : "غير مضبوط";
+
+    const leaveLog = config.leaveLogChannelId
+      ? `<#${config.leaveLogChannelId}>`
+      : "غير مضبوط";
+
     await interaction.reply({
       content:
         "**𝐇𝐄𝐑𝐕𝐈𝐍 WELCOME STATUS**\n\n" +
         `🎉 قناة الترحيب: ${welcomeChannel}\n` +
-        `👋 قناة المغادرة: ${leaveChannel}`,
+        `👋 قناة المغادرة: ${leaveChannel}\n` +
+        `👤 رتبة الأعضاء: ${memberRole}\n` +
+        `🤖 رتبة البوتات: ${botRole}\n` +
+        `📥 لوق الدخول: ${joinLog}\n` +
+        `📤 لوق الخروج: ${leaveLog}`,
       ephemeral: true
     });
 
@@ -187,30 +339,76 @@ async function handleWelcomeInteraction(interaction) {
   return false;
 }
 
-function initializeWelcome(client) {
-  client.on("guildMemberAdd", async member => {
-    const config = loadConfig()[member.guild.id]?.welcome;
-    if (!config) return;
+// =====================================
+// INITIALIZE WELCOME SYSTEM
+// =====================================
 
-    await sendConfiguredMessage(
+function initializeWelcome(client) {
+
+  client.on("guildMemberAdd", async member => {
+    const config = loadConfig()[member.guild.id] || {};
+
+    // Automatic roles
+    if (member.user.bot) {
+      await giveAutoRole(
+        member,
+        config.botRoleId,
+        "BOT"
+      );
+    } else {
+      await giveAutoRole(
+        member,
+        config.memberRoleId,
+        "MEMBER"
+      );
+    }
+
+    // Welcome message for human members
+    if (!member.user.bot && config.welcome) {
+      await sendConfiguredMessage(
+        member.guild,
+        config.welcome.channelId,
+        config.welcome.message,
+        member.user,
+        member.guild.memberCount
+      );
+    }
+
+    // Join logs for members and bots
+    await sendMemberLog(
       member.guild,
-      config.channelId,
-      config.message,
-      member.user,
-      member.guild.memberCount
+      config.joinLogChannelId,
+      member.user.bot
+        ? "🤖 دخول بوت جديد"
+        : "📥 دخول عضو جديد",
+      member,
+      0x35c98a
     );
   });
 
   client.on("guildMemberRemove", async member => {
-    const config = loadConfig()[member.guild.id]?.leave;
-    if (!config) return;
+    const config = loadConfig()[member.guild.id] || {};
 
-    await sendConfiguredMessage(
+    // Leave message for human members
+    if (!member.user.bot && config.leave) {
+      await sendConfiguredMessage(
+        member.guild,
+        config.leave.channelId,
+        config.leave.message,
+        member.user,
+        member.guild.memberCount
+      );
+    }
+
+    // Leave logs
+    await sendMemberLog(
       member.guild,
-      config.channelId,
-      config.message,
-      member.user,
-      member.guild.memberCount
+      config.leaveLogChannelId,
+      member.user.bot
+        ? "🤖 خروج بوت"
+        : "📤 خروج عضو",
+      member,
+      0xef6464
     );
   });
 
