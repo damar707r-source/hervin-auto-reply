@@ -1045,3 +1045,10 @@ app.post("/api/welcome-settings", requireGuild, async (req, res) => {
     });
   }
 });
+// =====================================
+// START HERVIN DASHBOARD
+// =====================================
+
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`HERVIN Dashboard running on port ${PORT}`);
+});
