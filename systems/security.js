@@ -9,10 +9,22 @@ const {
 const fs = require("fs");
 const path = require("path");
 
+// =====================================
+// HERVIN ADVANCED SECURITY SYSTEM
+// =====================================
+
 const configPath = path.join(__dirname, "security.json");
+const tempConfigPath = configPath + ".tmp";
 
 const DEFAULT_THRESHOLD = 3;
 const WINDOW_MS = 10000;
+
+const SPAM_LIMIT = 6;
+const SPAM_WINDOW = 5000;
+const SPAM_TIMEOUT = 10 * 60 * 1000;
+
+const AUDIT_DELAY = 1200;
+const AUDIT_MAX_AGE = 10000;
 
 const dangerousPermissions = [
   PermissionFlagsBits.Administrator,
@@ -24,34 +36,111 @@ const dangerousPermissions = [
   PermissionFlagsBits.ManageWebhooks
 ];
 
+// =====================================
+// STORAGE & MEMORY
+// =====================================
+
 const actionCounts = new Map();
 const spamMessages = new Map();
+
 const punishedUsers = new Set();
+const spamPunishedUsers = new Set();
 const processedAuditEntries = new Set();
+
+const initializedClients = new WeakSet();
+
+let configCache = null;
+
+// =====================================
+// CONFIGURATION
+// =====================================
 
 function loadConfig() {
   try {
-    if (!fs.existsSync(configPath)) return {};
-    return JSON.parse(fs.readFileSync(configPath, "utf8"));
+    if (!fs.existsSync(configPath)) {
+      configCache = {};
+      return configCache;
+    }
+
+    const raw = fs.readFileSync(configPath, "utf8");
+    const parsed = JSON.parse(raw);
+
+    if (
+      !parsed ||
+      typeof parsed !== "object" ||
+      Array.isArray(parsed)
+    ) {
+      throw new Error("Invalid security configuration format");
+    }
+
+    configCache = parsed;
+    return configCache;
+
   } catch (error) {
-    console.error("Security config error:", error);
-    return {};
+    console.error("[HERVIN SECURITY] Config load error:", error);
+    return configCache || {};
   }
 }
 
 function saveConfig(data) {
-  fs.writeFileSync(configPath, JSON.stringify(data, null, 2));
+  try {
+    const json = JSON.stringify(data, null, 2);
+
+    fs.writeFileSync(tempConfigPath, json, "utf8");
+
+    fs.renameSync(tempConfigPath, configPath);
+
+    configCache = data;
+
+    return true;
+
+  } catch (error) {
+    console.error("[HERVIN SECURITY] Config save error:", error);
+
+    try {
+      if (fs.existsSync(tempConfigPath)) {
+        fs.unlinkSync(tempConfigPath);
+      }
+    } catch {}
+
+    throw error;
+  }
 }
 
 function getConfig(guildId) {
-  return loadConfig()[guildId] || null;
+  const data = configCache || loadConfig();
+  return data[guildId] || null;
+}
+
+// =====================================
+// HELPERS
+// =====================================
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 function isAdmin(interaction) {
   return interaction.memberPermissions?.has(
     PermissionFlagsBits.ManageGuild
-  );
+  ) ?? false;
 }
+
+function safeError(label, error) {
+  console.error(`[HERVIN SECURITY] ${label}:`, error);
+}
+
+async function safeEvent(label, callback) {
+  try {
+    await callback();
+  } catch (error) {
+    safeError(label, error);
+  }
+}
+
+// =====================================
+// SLASH COMMANDS
+// =====================================
 
 function registerSecurityCommands(commands) {
   commands.push(
@@ -59,113 +148,197 @@ function registerSecurityCommands(commands) {
       .setName("security-setup")
       .setDescription("Configure HERVIN security system")
       .addChannelOption(option =>
-        option.setName("logs")
+        option
+          .setName("logs")
           .setDescription("Security alerts channel")
           .addChannelTypes(ChannelType.GuildText)
-          .setRequired(true))
+          .setRequired(true)
+      )
       .addIntegerOption(option =>
-        option.setName("threshold")
+        option
+          .setName("threshold")
           .setDescription("Maximum actions before protection activates")
           .setMinValue(2)
           .setMaxValue(10)
-          .setRequired(false))
-      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+          .setRequired(false)
+      )
+      .setDefaultMemberPermissions(
+        PermissionFlagsBits.ManageGuild
+      )
       .toJSON(),
 
     new SlashCommandBuilder()
       .setName("security-status")
       .setDescription("Show HERVIN security settings")
-      .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+      .setDefaultMemberPermissions(
+        PermissionFlagsBits.ManageGuild
+      )
       .toJSON()
   );
 }
 
+// =====================================
+// SECURITY LOGS
+// =====================================
+
 async function sendLog(guild, message) {
-  const config = getConfig(guild.id);
-  if (!config?.logsChannelId) return;
-
-  const channel = guild.channels.cache.get(config.logsChannelId);
-  if (!channel?.isTextBased()) return;
-
   try {
-    await channel.send({ content: message });
+    if (!guild) return;
+
+    const config = getConfig(guild.id);
+
+    if (!config?.enabled || !config.logsChannelId) return;
+
+    let channel = guild.channels.cache.get(
+      config.logsChannelId
+    );
+
+    if (!channel) {
+      channel = await guild.channels.fetch(
+        config.logsChannelId
+      ).catch(() => null);
+    }
+
+    if (
+      !channel ||
+      !channel.isTextBased() ||
+      typeof channel.send !== "function"
+    ) {
+      return;
+    }
+
+    await channel.send({
+      content: message,
+      allowedMentions: {
+        parse: []
+      }
+    });
+
   } catch (error) {
-    console.error("Security log error:", error);
+    safeError("Security log", error);
   }
 }
+
+// =====================================
+// INTERACTION HANDLER
+// =====================================
 
 async function handleSecurityInteraction(interaction) {
   if (!interaction.isChatInputCommand()) return false;
 
-  if (interaction.commandName === "security-setup") {
-    if (!isAdmin(interaction)) {
-      await interaction.reply({
-        content: "تحتاج صلاحية Manage Server.",
-        ephemeral: true
-      });
-      return true;
-    }
+  if (
+    interaction.commandName !== "security-setup" &&
+    interaction.commandName !== "security-status"
+  ) {
+    return false;
+  }
 
-    const logs = interaction.options.getChannel("logs");
-    const threshold =
-      interaction.options.getInteger("threshold") || DEFAULT_THRESHOLD;
-
-    const data = loadConfig();
-
-    data[interaction.guildId] = {
-      logsChannelId: logs.id,
-      threshold,
-      enabled: true
-    };
-
-    saveConfig(data);
-
+  if (!interaction.guild) {
     await interaction.reply({
-      content:
-        "تم إعداد حماية HERVIN بنجاح 🛡️\n\n" +
-        `قناة السجلات: ${logs}\n` +
-        `حد العمليات: ${threshold}\n` +
-        "حماية التخريب والسبام مفعلة.",
+      content: "هذا الأمر متاح داخل السيرفر فقط.",
       ephemeral: true
     });
-
-    await sendLog(
-      interaction.guild,
-      "🛡️ تم إعداد نظام حماية HERVIN."
-    );
 
     return true;
   }
 
-  if (interaction.commandName === "security-status") {
-    if (!isAdmin(interaction)) {
+  if (!isAdmin(interaction)) {
+    await interaction.reply({
+      content: "تحتاج صلاحية Manage Server.",
+      ephemeral: true
+    });
+
+    return true;
+  }
+
+  // SETUP
+
+  if (interaction.commandName === "security-setup") {
+    const logs = interaction.options.getChannel("logs");
+
+    const threshold =
+      interaction.options.getInteger("threshold") ||
+      DEFAULT_THRESHOLD;
+
+    if (
+      !logs ||
+      logs.guildId !== interaction.guildId ||
+      !logs.isTextBased() ||
+      typeof logs.send !== "function"
+    ) {
       await interaction.reply({
-        content: "تحتاج صلاحية Manage Server.",
+        content: "يرجى اختيار قناة نصية صحيحة.",
         ephemeral: true
       });
+
       return true;
     }
 
+    try {
+      const data = {
+        ...(configCache || loadConfig())
+      };
+
+      data[interaction.guildId] = {
+        logsChannelId: logs.id,
+        threshold,
+        enabled: true
+      };
+
+      saveConfig(data);
+
+      await interaction.reply({
+        content:
+          "تم إعداد حماية HERVIN بنجاح 🛡️\n\n" +
+          `قناة السجلات: ${logs}\n` +
+          `حد العمليات: ${threshold}\n` +
+          "حماية التخريب والسبام مفعلة.",
+        ephemeral: true
+      });
+
+      await sendLog(
+        interaction.guild,
+        "🛡️ تم إعداد نظام حماية HERVIN بنجاح."
+      );
+
+    } catch (error) {
+      safeError("Security setup", error);
+
+      await interaction.reply({
+        content: "حدث خطأ أثناء حفظ إعدادات الحماية.",
+        ephemeral: true
+      }).catch(() => {});
+    }
+
+    return true;
+  }
+
+  // STATUS
+
+  if (interaction.commandName === "security-status") {
     const config = getConfig(interaction.guildId);
 
     if (!config) {
       await interaction.reply({
-        content: "نظام الحماية غير مجهز. استخدم /security-setup أولًا.",
+        content:
+          "نظام الحماية غير مجهز. استخدم /security-setup أولًا.",
         ephemeral: true
       });
+
       return true;
     }
 
-    const logs = interaction.guild.channels.cache.get(
+    const logs = await interaction.guild.channels.fetch(
       config.logsChannelId
-    );
+    ).catch(() => null);
 
     await interaction.reply({
       content:
         "**HERVIN SECURITY STATUS** 🛡️\n\n" +
         `الحالة: ${config.enabled ? "مفعل 🟢" : "معطل 🔴"}\n` +
         `السجلات: ${logs || "القناة غير موجودة"}\n` +
-        `حد العمليات: ${config.threshold}`,
+        `حد العمليات: ${config.threshold || DEFAULT_THRESHOLD}\n` +
+        `حماية السبام: ${config.enabled ? "مفعلة" : "معطلة"}`,
       ephemeral: true
     });
 
@@ -176,82 +349,134 @@ async function handleSecurityInteraction(interaction) {
 }
 
 // =====================================
-// ANTI-NUKE
+// AUDIT LOG SYSTEM
 // =====================================
 
 async function getExecutor(guild, auditType, targetId) {
   try {
     const logs = await guild.fetchAuditLogs({
       type: auditType,
-      limit: 5
+      limit: 10
     });
 
-    const entry = logs.entries.find(item =>
-      item.target?.id === targetId &&
-      Date.now() - item.createdTimestamp < 8000 &&
-      !processedAuditEntries.has(item.id)
-    );
+    const now = Date.now();
 
-    if (!entry) return null;
+    const entry = logs.entries
+      .filter(item =>
+        item.target?.id === targetId &&
+        now - item.createdTimestamp >= 0 &&
+        now - item.createdTimestamp <= AUDIT_MAX_AGE &&
+        !processedAuditEntries.has(item.id)
+      )
+      .sort((a, b) =>
+        b.createdTimestamp - a.createdTimestamp
+      )[0];
+
+    if (!entry?.executor) return null;
 
     processedAuditEntries.add(entry.id);
 
     setTimeout(() => {
       processedAuditEntries.delete(entry.id);
-    }, 30000);
+    }, 60000);
 
-    return entry.executor || null;
+    return entry.executor;
+
   } catch (error) {
-    console.error("Audit log error:", error);
+    safeError("Audit log fetch", error);
     return null;
   }
 }
 
+async function auditEvent(guild, auditType, targetId, reason) {
+  await sleep(AUDIT_DELAY);
+
+  const executor = await getExecutor(
+    guild,
+    auditType,
+    targetId
+  );
+
+  if (!executor) return;
+
+  await recordAction(guild, executor, reason);
+}
+
+// =====================================
+// ANTI-NUKE PUNISHMENT
+// =====================================
+
 async function punishExecutor(guild, user, reason) {
-  if (!user || user.id === guild.ownerId || user.bot) return;
+  if (
+    !user ||
+    user.bot ||
+    user.id === guild.ownerId
+  ) {
+    return;
+  }
 
   const key = `${guild.id}:${user.id}`;
 
   if (punishedUsers.has(key)) return;
 
-  const member = await guild.members.fetch(user.id).catch(() => null);
-  if (!member || !member.manageable) return;
-
   punishedUsers.add(key);
 
   try {
+    const member = await guild.members.fetch(user.id)
+      .catch(() => null);
+
+    if (!member) {
+      await sendLog(
+        guild,
+        `⚠️ تعذر العثور على العضو ${user.id} لتنفيذ الحماية.`
+      );
+
+      return;
+    }
+
+    if (!member.manageable) {
+      await sendLog(
+        guild,
+        `⚠️ لا يستطيع البوت تعديل رتب ${user} بسبب ترتيب الرتب.`
+      );
+
+      return;
+    }
+
     const removableRoles = member.roles.cache.filter(role =>
       role.id !== guild.id &&
       !role.managed &&
+      role.editable &&
       dangerousPermissions.some(permission =>
         role.permissions.has(permission)
-      ) &&
-      role.editable
+      )
     );
 
-    if (removableRoles.size) {
+    if (removableRoles.size > 0) {
       await member.roles.remove(
-        removableRoles,
+        removableRoles.map(role => role.id),
         "HERVIN Anti-Nuke Protection"
       );
     }
 
     await sendLog(
       guild,
-      "🚨 **HERVIN ANTI-NUKE**\n" +
-      `العضو: ${user}\n` +
+      "🚨 **HERVIN ANTI-NUKE**\n\n" +
+      `العضو: ${user.tag || user.username}\n` +
       `المعرف: \`${user.id}\`\n` +
       `السبب: ${reason}\n` +
       "الإجراء: إزالة الرتب ذات الصلاحيات الخطرة\n" +
       `عدد الرتب المتأثرة: ${removableRoles.size}`
     );
+
   } catch (error) {
-    console.error("Anti-nuke action error:", error);
+    safeError("Anti-nuke punishment", error);
 
     await sendLog(
       guild,
-      `⚠️ تعذرت إزالة صلاحيات ${user}، تحقق من ترتيب رتب البوت.`
+      `⚠️ فشل تنفيذ الحماية على ${user.username}. تحقق من صلاحيات البوت.`
     );
+
   } finally {
     setTimeout(() => {
       punishedUsers.delete(key);
@@ -259,25 +484,39 @@ async function punishExecutor(guild, user, reason) {
   }
 }
 
+// =====================================
+// ACTION COUNTER
+// =====================================
+
 async function recordAction(guild, user, reason) {
   const config = getConfig(guild.id);
-  if (!config?.enabled || !user) return;
+
+  if (
+    !config?.enabled ||
+    !user ||
+    user.bot ||
+    user.id === guild.ownerId
+  ) {
+    return;
+  }
 
   const key = `${guild.id}:${user.id}`;
   const now = Date.now();
 
   const previous = actionCounts.get(key) || [];
-  const recent = previous.filter(time => now - time < WINDOW_MS);
 
-  recent.push(now);
-  actionCounts.set(key, recent);
-
-  await sendLog(
-    guild,
-    `⚠️ **عملية مراقبة**\nالعضو: <@${user.id}>\nالعملية: ${reason}\nالعدد خلال 10 ثوانٍ: ${recent.length}`
+  const recent = previous.filter(
+    time => now - time < WINDOW_MS
   );
 
-  if (recent.length >= (config.threshold || DEFAULT_THRESHOLD)) {
+  recent.push(now);
+
+  actionCounts.set(key, recent);
+
+  const threshold =
+    Number(config.threshold) || DEFAULT_THRESHOLD;
+
+  if (recent.length >= threshold) {
     actionCounts.delete(key);
 
     await punishExecutor(
@@ -285,14 +524,17 @@ async function recordAction(guild, user, reason) {
       user,
       `تجاوز حد العمليات: ${reason}`
     );
+
+    return;
   }
-}
 
-async function auditEvent(guild, auditType, targetId, reason) {
-  const user = await getExecutor(guild, auditType, targetId);
-  if (!user) return;
-
-  await recordAction(guild, user, reason);
+  await sendLog(
+    guild,
+    "⚠️ **HERVIN SECURITY ALERT**\n\n" +
+    `العضو: <@${user.id}>\n` +
+    `العملية: ${reason}\n` +
+    `العدد خلال 10 ثوانٍ: ${recent.length}/${threshold}`
+  );
 }
 
 // =====================================
@@ -300,128 +542,230 @@ async function auditEvent(guild, auditType, targetId, reason) {
 // =====================================
 
 function initializeSecurity(client) {
-  client.on("channelDelete", async channel => {
-    if (!channel.guild) return;
+  if (!client || !client.on) {
+    throw new Error("Invalid Discord client");
+  }
 
-    await auditEvent(
-      channel.guild,
-      AuditLogEvent.ChannelDelete,
-      channel.id,
-      "حذف قناة"
-    );
-  });
+  // Prevent duplicate listeners
 
-  client.on("roleDelete", async role => {
-    await auditEvent(
-      role.guild,
-      AuditLogEvent.RoleDelete,
-      role.id,
-      "حذف رتبة"
-    );
-  });
-
-  client.on("guildBanAdd", async ban => {
-    await auditEvent(
-      ban.guild,
-      AuditLogEvent.MemberBanAdd,
-      ban.user.id,
-      "حظر عضو"
-    );
-  });
-
-  client.on("guildMemberRemove", async member => {
-    await auditEvent(
-      member.guild,
-      AuditLogEvent.MemberKick,
-      member.id,
-      "طرد عضو"
-    );
-  });
-
-  client.on("roleUpdate", async (oldRole, newRole) => {
-    const gainedDangerousPermission = dangerousPermissions.some(
-      permission =>
-        !oldRole.permissions.has(permission) &&
-        newRole.permissions.has(permission)
+  if (initializedClients.has(client)) {
+    console.log(
+      "[HERVIN SECURITY] Already initialized."
     );
 
-    if (!gainedDangerousPermission) return;
+    return;
+  }
 
-    await auditEvent(
-      newRole.guild,
-      AuditLogEvent.RoleUpdate,
-      newRole.id,
-      "إضافة صلاحيات خطرة لرتبة"
-    );
-  });
+  initializedClients.add(client);
 
-  // =====================================
-  // ANTI-SPAM
-  // =====================================
+  loadConfig();
 
-  client.on("messageCreate", async message => {
-    if (!message.guild || message.author.bot) return;
+  // CHANNEL DELETE
 
-    const config = getConfig(message.guild.id);
-    if (!config?.enabled) return;
+  client.on("channelDelete", channel => {
+    safeEvent("Channel delete", async () => {
+      if (!channel.guild) return;
 
-    const member = message.member;
-
-    if (
-      !member ||
-      member.permissions.has(PermissionFlagsBits.Administrator) ||
-      member.permissions.has(PermissionFlagsBits.ManageMessages)
-    ) return;
-
-    const key = `${message.guild.id}:${message.author.id}`;
-    const now = Date.now();
-
-    const previous = spamMessages.get(key) || [];
-    const recent = previous.filter(time => now - time < 5000);
-
-    recent.push(now);
-    spamMessages.set(key, recent);
-
-    if (recent.length < 6) return;
-
-    spamMessages.delete(key);
-
-    try {
-      const messages = await message.channel.messages.fetch({
-        limit: 30
-      });
-
-      const userMessages = messages.filter(msg =>
-        msg.author.id === message.author.id &&
-        Date.now() - msg.createdTimestamp < 7000
+      await auditEvent(
+        channel.guild,
+        AuditLogEvent.ChannelDelete,
+        channel.id,
+        "حذف قناة"
       );
+    });
+  });
 
-      if (userMessages.size) {
-        await message.channel.bulkDelete(userMessages, true);
+  // ROLE DELETE
+
+  client.on("roleDelete", role => {
+    safeEvent("Role delete", async () => {
+      await auditEvent(
+        role.guild,
+        AuditLogEvent.RoleDelete,
+        role.id,
+        "حذف رتبة"
+      );
+    });
+  });
+
+  // MEMBER BAN
+
+  client.on("guildBanAdd", ban => {
+    safeEvent("Member ban", async () => {
+      await auditEvent(
+        ban.guild,
+        AuditLogEvent.MemberBanAdd,
+        ban.user.id,
+        "حظر عضو"
+      );
+    });
+  });
+
+  // MEMBER KICK
+
+  client.on("guildMemberRemove", member => {
+    safeEvent("Member remove", async () => {
+      await auditEvent(
+        member.guild,
+        AuditLogEvent.MemberKick,
+        member.id,
+        "طرد عضو"
+      );
+    });
+  });
+
+  // ROLE UPDATE
+
+  client.on("roleUpdate", (oldRole, newRole) => {
+    safeEvent("Role update", async () => {
+      const gainedDangerousPermission =
+        dangerousPermissions.some(permission =>
+          !oldRole.permissions.has(permission) &&
+          newRole.permissions.has(permission)
+        );
+
+      if (!gainedDangerousPermission) return;
+
+      await auditEvent(
+        newRole.guild,
+        AuditLogEvent.RoleUpdate,
+        newRole.id,
+        "إضافة صلاحيات خطرة لرتبة"
+      );
+    });
+  });
+
+  // =====================================
+  // ANTI-SPAM SYSTEM
+  // =====================================
+
+  client.on("messageCreate", message => {
+    safeEvent("Anti-spam", async () => {
+      if (
+        !message.guild ||
+        message.author.bot ||
+        message.webhookId
+      ) {
+        return;
       }
 
-      if (member.moderatable) {
-        await member.timeout(
-          10 * 60 * 1000,
-          "HERVIN Anti-Spam"
+      const config = getConfig(message.guild.id);
+
+      if (!config?.enabled) return;
+
+      const member = message.member;
+
+      if (!member) return;
+
+      // Ignore administrators and moderators
+
+      if (
+        member.permissions.has(
+          PermissionFlagsBits.Administrator
+        ) ||
+        member.permissions.has(
+          PermissionFlagsBits.ManageMessages
+        )
+      ) {
+        return;
+      }
+
+      const key =
+        `${message.guild.id}:${message.author.id}`;
+
+      if (spamPunishedUsers.has(key)) return;
+
+      const now = Date.now();
+
+      const previous = spamMessages.get(key) || [];
+
+      const recent = previous.filter(
+        time => now - time < SPAM_WINDOW
+      );
+
+      recent.push(now);
+
+      spamMessages.set(key, recent);
+
+      if (recent.length < SPAM_LIMIT) return;
+
+      // Prevent repeated punishment
+
+      spamMessages.delete(key);
+      spamPunishedUsers.add(key);
+
+      try {
+        // Fetch recent messages
+
+        const messages = await message.channel.messages.fetch({
+          limit: 30
+        });
+
+        const userMessages = messages.filter(msg =>
+          msg.author.id === message.author.id &&
+          Date.now() - msg.createdTimestamp < 7000 &&
+          Date.now() - msg.createdTimestamp < 14 * 24 * 60 * 60 * 1000
         );
+
+        // Delete spam messages
+
+        if (userMessages.size > 1) {
+          await message.channel.bulkDelete(
+            userMessages,
+            true
+          );
+        } else if (userMessages.size === 1) {
+          await userMessages.first()
+            .delete()
+            .catch(error =>
+              safeError("Spam message delete", error)
+            );
+        }
+
+      } catch (error) {
+        safeError("Spam deletion", error);
+      }
+
+      // Timeout independently of message deletion
+
+      try {
+        if (member.moderatable) {
+          await member.timeout(
+            SPAM_TIMEOUT,
+            "HERVIN Anti-Spam"
+          );
+        }
+
+      } catch (error) {
+        safeError("Spam timeout", error);
       }
 
       await sendLog(
         message.guild,
-        "🚫 **HERVIN ANTI-SPAM**\n" +
-        `العضو: ${message.author}\n` +
-        `القناة: ${message.channel}\n` +
+        "🚫 **HERVIN ANTI-SPAM**\n\n" +
+        `العضو: <@${message.author.id}>\n` +
+        `القناة: <#${message.channel.id}>\n` +
         "السبب: إرسال رسائل متكررة بسرعة\n" +
-        "الإجراء: حذف الرسائل ومحاولة إسكات العضو 10 دقائق."
+        "الإجراء: حذف الرسائل ومحاولة إسكات العضو لمدة 10 دقائق."
       );
-    } catch (error) {
-      console.error("Anti-spam error:", error);
-    }
+
+      // Release protection lock
+
+      setTimeout(() => {
+        spamPunishedUsers.delete(key);
+      }, SPAM_TIMEOUT);
+
+    });
   });
 
-  console.log("HERVIN Security initialized");
+  console.log(
+    "🛡️ HERVIN ADVANCED SECURITY INITIALIZED"
+  );
 }
+
+// =====================================
+// EXPORTS
+// =====================================
 
 module.exports = {
   registerSecurityCommands,
