@@ -1,16 +1,17 @@
-
 const express = require("express");
 const crypto = require("crypto");
+const fs = require("fs");
+const path = require("path");
 
 const app = express();
 
-app.use(express.json());
+app.use(express.json({ limit: "20kb" }));
 
 // تشغيل بوت HERVIN
 require("./index");
 
 // =====================================
-// HERVIN DISCORD OAUTH SYSTEM
+// HERVIN CONFIGURATION
 // =====================================
 
 const CLIENT_ID = process.env.CLIENT_ID;
@@ -20,12 +21,48 @@ const SESSION_SECRET = process.env.SESSION_SECRET;
 const REDIRECT_URI =
   "https://hervin-dashboard.onrender.com/auth/discord/callback";
 
+const repliesFile = path.join(__dirname, "replies.json");
+
 const sessions = new Map();
 const loginStates = new Map();
 
 const SESSION_MAX_AGE = 24 * 60 * 60 * 1000;
 
-// فحص المتغيرات عند تشغيل الموقع
+// =====================================
+// STORAGE
+// =====================================
+
+function loadReplies() {
+  try {
+    if (!fs.existsSync(repliesFile)) return {};
+
+    const data = JSON.parse(
+      fs.readFileSync(repliesFile, "utf8")
+    );
+
+    return data &&
+      typeof data === "object" &&
+      !Array.isArray(data)
+      ? data
+      : {};
+  } catch (error) {
+    console.error("Replies load error:", error);
+    return {};
+  }
+}
+
+function saveReplies(data) {
+  fs.writeFileSync(
+    repliesFile,
+    JSON.stringify(data, null, 2),
+    "utf8"
+  );
+}
+
+// =====================================
+// OAUTH ENV CHECK
+// =====================================
+
 console.log("=================================");
 console.log("HERVIN OAUTH ENV CHECK:", {
   CLIENT_ID: Boolean(CLIENT_ID),
@@ -33,6 +70,10 @@ console.log("HERVIN OAUTH ENV CHECK:", {
   SESSION_SECRET: Boolean(SESSION_SECRET)
 });
 console.log("=================================");
+
+// =====================================
+// SESSION SECURITY
+// =====================================
 
 function createSignature(value) {
   return crypto
@@ -43,7 +84,10 @@ function createSignature(value) {
 
 function getSession(req) {
   const cookies = req.headers.cookie || "";
-  const match = cookies.match(/(?:^|;\s*)hervin_session=([^;]+)/);
+
+  const match = cookies.match(
+    /(?:^|;\s*)hervin_session=([^;]+)/
+  );
 
   if (!match) return null;
 
@@ -53,17 +97,18 @@ function getSession(req) {
 
   const [sessionId, signature] = parts;
 
-  let expected;
-
   try {
-    expected = createSignature(sessionId);
+    const expected = createSignature(sessionId);
 
     const receivedBuffer = Buffer.from(signature, "hex");
     const expectedBuffer = Buffer.from(expected, "hex");
 
     if (
       receivedBuffer.length !== expectedBuffer.length ||
-      !crypto.timingSafeEqual(receivedBuffer, expectedBuffer)
+      !crypto.timingSafeEqual(
+        receivedBuffer,
+        expectedBuffer
+      )
     ) {
       return null;
     }
@@ -84,8 +129,7 @@ function getSession(req) {
 }
 
 // =====================================
-// HERVIN SERVER ACCESS CHECK
-// OWNER OR ADMINISTRATOR
+// SERVER PERMISSIONS
 // =====================================
 
 function canManageGuild(guild) {
@@ -94,7 +138,6 @@ function canManageGuild(guild) {
   try {
     const permissions = BigInt(guild.permissions || "0");
 
-    // Discord Administrator permission
     return (permissions & 8n) === 8n;
   } catch {
     return false;
@@ -114,18 +157,23 @@ function requireSession(req, res, next) {
   next();
 }
 
+function getSelectedGuild(req) {
+  const session = req.hervinSession;
+
+  if (!session.selectedGuild) return null;
+
+  return session.guilds.find(guild =>
+    guild.id === session.selectedGuild.id &&
+    canManageGuild(guild)
+  ) || null;
+}
+
 // =====================================
 // DISCORD LOGIN
 // =====================================
 
 app.get("/auth/discord", (req, res) => {
   if (!CLIENT_ID || !CLIENT_SECRET || !SESSION_SECRET) {
-    console.log("OAuth ENV CHECK:", {
-      CLIENT_ID: Boolean(CLIENT_ID),
-      CLIENT_SECRET: Boolean(CLIENT_SECRET),
-      SESSION_SECRET: Boolean(SESSION_SECRET)
-    });
-
     return res.status(500).send(
       "إعدادات تسجيل الدخول غير مكتملة في Render"
     );
@@ -144,7 +192,8 @@ app.get("/auth/discord", (req, res) => {
   });
 
   res.redirect(
-    "https://discord.com/oauth2/authorize?" + params.toString()
+    "https://discord.com/oauth2/authorize?" +
+    params.toString()
   );
 });
 
@@ -222,7 +271,6 @@ app.get("/auth/discord/callback", async (req, res) => {
     const user = await userResponse.json();
     const allGuilds = await guildsResponse.json();
 
-    // السيرفرات التي المستخدم مالكها أو لديه Administrator فيها
     const ownedGuilds = allGuilds.filter(canManageGuild);
 
     const sessionId = crypto.randomBytes(32).toString("hex");
@@ -257,7 +305,7 @@ app.get("/auth/discord/callback", async (req, res) => {
 });
 
 // =====================================
-// GET USER INFORMATION
+// USER INFORMATION
 // =====================================
 
 app.get("/api/me", requireSession, (req, res) => {
@@ -271,15 +319,12 @@ app.get("/api/me", requireSession, (req, res) => {
 });
 
 // =====================================
-// GET MANAGEABLE SERVERS
-// OWNER OR ADMINISTRATOR
+// MANAGEABLE SERVERS
 // =====================================
 
 app.get("/api/guilds", requireSession, (req, res) => {
-  const session = req.hervinSession;
-
   res.json(
-    session.guilds
+    req.hervinSession.guilds
       .filter(canManageGuild)
       .map(guild => ({
         id: guild.id,
@@ -303,8 +348,8 @@ app.post("/api/select-server", requireSession, (req, res) => {
     });
   }
 
-  const guild = session.guilds.find(
-    item => item.id === guildId && canManageGuild(item)
+  const guild = session.guilds.find(item =>
+    item.id === guildId && canManageGuild(item)
   );
 
   if (!guild) {
@@ -323,26 +368,225 @@ app.post("/api/select-server", requireSession, (req, res) => {
     selectedGuild: session.selectedGuild
   });
 });
-
 // =====================================
-// LOGOUT
+// HERVIN AUTO REPLIES API
 // =====================================
 
-app.post("/auth/logout", (req, res) => {
-  const cookies = req.headers.cookie || "";
-  const match = cookies.match(/(?:^|;\s*)hervin_session=([^;]+)/);
+app.get("/api/replies", requireSession, (req, res) => {
+  const guild = getSelectedGuild(req);
 
-  if (match) {
-    const sessionId = match[1].split(".")[0];
-    sessions.delete(sessionId);
+  if (!guild) {
+    return res.status(403).json({
+      error: "اختر سيرفرًا تملك صلاحية إدارته أولاً"
+    });
   }
 
-  res.setHeader(
-    "Set-Cookie",
-    "hervin_session=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0"
-  );
+  const data = loadReplies();
+  const guildReplies = data[guild.id] || {};
 
-  res.json({ success: true });
+  res.json({
+    success: true,
+    replies: Object.values(guildReplies)
+  });
+});
+
+// =====================================
+// ADD / EDIT / DELETE / TOGGLE REPLIES
+// =====================================
+
+app.post("/api/replies", requireSession, (req, res) => {
+  const guild = getSelectedGuild(req);
+
+  if (!guild) {
+    return res.status(403).json({
+      error: "ليس لديك صلاحية إدارة السيرفر المحدد"
+    });
+  }
+
+  const {
+    action,
+    trigger,
+    response,
+    oldTrigger,
+    enabled
+  } = req.body || {};
+
+  const allowedActions = [
+    "add",
+    "edit",
+    "delete",
+    "toggle"
+  ];
+
+  if (!allowedActions.includes(action)) {
+    return res.status(400).json({
+      error: "العملية المطلوبة غير صحيحة"
+    });
+  }
+
+  const cleanTrigger =
+    typeof trigger === "string" ? trigger.trim() : "";
+
+  const cleanOldTrigger =
+    typeof oldTrigger === "string" ? oldTrigger.trim() : "";
+
+  const key = cleanTrigger.toLowerCase();
+  const oldKey = cleanOldTrigger.toLowerCase();
+
+  const forbiddenKeys = [
+    "__proto__",
+    "constructor",
+    "prototype"
+  ];
+
+  if (
+    ["add", "edit", "delete", "toggle"].includes(action) &&
+    !cleanTrigger
+  ) {
+    return res.status(400).json({
+      error: "اكتب كلمة التفعيل"
+    });
+  }
+
+  if (
+    cleanTrigger.length > 80 ||
+    cleanOldTrigger.length > 80
+  ) {
+    return res.status(400).json({
+      error: "كلمة التفعيل طويلة جدًا"
+    });
+  }
+
+  if (
+    forbiddenKeys.includes(key) ||
+    forbiddenKeys.includes(oldKey)
+  ) {
+    return res.status(400).json({
+      error: "كلمة التفعيل غير مسموحة"
+    });
+  }
+
+  const data = loadReplies();
+
+  if (!data[guild.id] || typeof data[guild.id] !== "object") {
+    data[guild.id] = {};
+  }
+
+  const guildReplies = data[guild.id];
+
+  try {
+    // ADD
+    if (action === "add") {
+      if (
+        typeof response !== "string" ||
+        !response.trim()
+      ) {
+        return res.status(400).json({
+          error: "اكتب نص الرد"
+        });
+      }
+
+      if (response.length > 1900) {
+        return res.status(400).json({
+          error: "الرد طويل جدًا، الحد الأقصى 1900 حرف"
+        });
+      }
+
+      if (guildReplies[key]) {
+        return res.status(409).json({
+          error: "كلمة التفعيل موجودة مسبقًا"
+        });
+      }
+
+      guildReplies[key] = {
+        trigger: cleanTrigger,
+        response: response.trim(),
+        enabled: true
+      };
+    }
+
+    // EDIT
+    if (action === "edit") {
+      if (!cleanOldTrigger || !guildReplies[oldKey]) {
+        return res.status(404).json({
+          error: "الرد المطلوب تعديله غير موجود"
+        });
+      }
+
+      if (
+        typeof response !== "string" ||
+        !response.trim()
+      ) {
+        return res.status(400).json({
+          error: "اكتب نص الرد"
+        });
+      }
+
+      if (response.length > 1900) {
+        return res.status(400).json({
+          error: "الرد طويل جدًا"
+        });
+      }
+
+      if (key !== oldKey && guildReplies[key]) {
+        return res.status(409).json({
+          error: "كلمة التفعيل الجديدة مستخدمة مسبقًا"
+        });
+      }
+
+      const previous = guildReplies[oldKey];
+
+      delete guildReplies[oldKey];
+
+      guildReplies[key] = {
+        trigger: cleanTrigger,
+        response: response.trim(),
+        enabled: previous.enabled !== false
+      };
+    }
+
+    // DELETE
+    if (action === "delete") {
+      if (!guildReplies[key]) {
+        return res.status(404).json({
+          error: "الرد غير موجود"
+        });
+      }
+
+      delete guildReplies[key];
+    }
+
+    // TOGGLE
+    if (action === "toggle") {
+      if (!guildReplies[key]) {
+        return res.status(404).json({
+          error: "الرد غير موجود"
+        });
+      }
+
+      if (typeof enabled !== "boolean") {
+        return res.status(400).json({
+          error: "حالة التفعيل غير صحيحة"
+        });
+      }
+
+      guildReplies[key].enabled = enabled;
+    }
+
+    saveReplies(data);
+
+    res.json({
+      success: true,
+      message: "تم تنفيذ العملية بنجاح",
+      replies: Object.values(guildReplies)
+    });
+  } catch (error) {
+    console.error("HERVIN Replies API Error:", error);
+
+    res.status(500).json({
+      error: "حدث خطأ أثناء حفظ الردود"
+    });
+  }
 });
 
 // =====================================
@@ -350,473 +594,434 @@ app.post("/auth/logout", (req, res) => {
 // =====================================
 
 app.get("/", (req, res) => {
-res.send(`<!DOCTYPE html>
+  res.send(`<!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>HERVIN | Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HERVIN Dashboard</title>
 
 <style>
-*{box-sizing:border-box}
-
-:root{
---bg:#030512;
---card:#080b1b;
---purple:#211b45;
---purple2:#17132f;
---gold:#d9b84f;
---white:#fff;
---muted:#a7a8b5;
---border:#171b2d;
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
 }
 
-body{
-margin:0;
-background:var(--bg);
-color:var(--white);
-font-family:Arial,sans-serif;
+:root {
+  --bg: #09090f;
+  --panel: #12121c;
+  --panel2: #191927;
+  --purple: #8b5cf6;
+  --purple2: #6d3de0;
+  --gold: #d6b56d;
+  --text: #f5f3ff;
+  --muted: #9995aa;
+  --border: rgba(255,255,255,.08);
+  --green: #35c98a;
+  --red: #ef6464;
 }
 
-.header{
-height:125px;
-background:#03040d;
-border-bottom:1px solid #292a38;
-display:flex;
-align-items:center;
-justify-content:space-between;
-padding:0 25px;
-position:sticky;
-top:0;
-z-index:10;
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: Arial, sans-serif;
+  min-height: 100vh;
 }
 
-.header-left,.header-right{
-display:flex;
-align-items:center;
-gap:12px;
+button, input, textarea, select {
+  font-family: inherit;
 }
 
-.logo{
-position:absolute;
-left:50%;
-transform:translateX(-50%);
-font-size:27px;
-font-weight:bold;
-letter-spacing:3px;
-color:var(--gold);
+button {
+  cursor: pointer;
 }
 
-.icon-btn{
-width:66px;
-height:66px;
-border-radius:23px;
-background:#111225;
-border:1px solid #25263a;
-color:white;
-font-size:25px;
-cursor:pointer;
+.header {
+  height: 75px;
+  padding: 0 5%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: rgba(18,18,28,.95);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 20;
 }
 
-.avatar{
-width:55px;
-height:55px;
-border-radius:50%;
-background:var(--purple);
-display:grid;
-place-items:center;
-color:var(--gold);
-font-weight:bold;
+.logo {
+  font-size: 25px;
+  font-weight: 900;
+  letter-spacing: 4px;
+  color: var(--gold);
 }
 
-.menu{
-position:absolute;
-top:105px;
-left:20px;
-width:230px;
-background:#101124;
-border:1px solid #292940;
-border-radius:15px;
-padding:12px;
-display:none;
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 
-.menu.show{display:block}
-
-.menu a{
-display:block;
-padding:13px;
-color:#ddd;
-text-decoration:none;
-border-radius:9px;
+.main {
+  width: 92%;
+  max-width: 1250px;
+  margin: 35px auto;
 }
 
-.menu a:hover{background:var(--purple)}
-
-main{
-max-width:1100px;
-margin:auto;
-padding:25px 24px 60px;
+.welcome-box {
+  background:
+    radial-gradient(circle at 90% 10%, rgba(139,92,246,.25), transparent 35%),
+    linear-gradient(135deg,#171525,#11111b);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  padding: 35px;
+  margin-bottom: 25px;
 }
 
-.page-title{
-display:flex;
-align-items:center;
-justify-content:space-between;
-margin:10px 0 25px;
+.welcome-box h1 {
+  font-size: 30px;
+  margin-bottom: 12px;
 }
 
-.page-title h1{
-font-size:28px;
-margin:0;
+.welcome-box p {
+  color: var(--muted);
+  line-height: 1.8;
 }
 
-.page-title p{
-color:var(--muted);
-margin:10px 0 0;
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 24px;
+  margin-bottom: 22px;
 }
 
-.status{
-background:#151c27;
-color:#9ce5ad;
-padding:10px 15px;
-border-radius:20px;
-font-size:13px;
+.panel h2 {
+  font-size: 20px;
+  margin-bottom: 10px;
 }
 
-.section{
-background:var(--card);
-border:1px solid var(--border);
-border-radius:23px;
-padding:35px 40px;
-margin-bottom:35px;
+.description {
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.8;
+  margin-bottom: 20px;
 }
 
-.section-head{
-display:flex;
-align-items:center;
-gap:18px;
-margin-bottom:40px;
+.btn {
+  border: 0;
+  border-radius: 9px;
+  padding: 12px 18px;
+  background: var(--purple);
+  color: white;
+  font-weight: bold;
+  transition: .2s;
 }
 
-.section-icon{
-width:80px;
-height:80px;
-border-radius:23px;
-background:#15112f;
-display:grid;
-place-items:center;
-color:var(--gold);
-font-size:33px;
+.btn:hover {
+  background: var(--purple2);
 }
 
-.section-head h2{
-font-size:31px;
-margin:0;
+.btn.gold {
+  background: var(--gold);
+  color: #17120a;
 }
 
-.section-head p{
-color:var(--muted);
-font-size:18px;
-margin:12px 0 0;
+.btn.dark {
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  color: var(--text);
 }
 
-.field{margin-bottom:35px}
-
-.field label{
-display:block;
-font-size:20px;
-color:#b9b9c5;
-margin-bottom:20px;
+.btn.danger {
+  background: rgba(239,100,100,.15);
+  color: #ff8585;
+  border: 1px solid rgba(239,100,100,.25);
 }
 
-select,input{
-width:100%;
-height:68px;
-padding:0 20px;
-border:1px solid #33354b;
-border-radius:12px;
-background:var(--purple);
-color:white;
-font-size:19px;
-outline:none;
+.btn.success {
+  background: rgba(53,201,138,.15);
+  color: #55dfa5;
+  border: 1px solid rgba(53,201,138,.25);
 }
 
-select option{background:#15112f}
-
-.preview{
-background:#10142c;
-border:1px solid #292d46;
-border-right:5px solid #a7a7ae;
-border-radius:13px;
-padding:24px;
-display:flex;
-align-items:center;
-justify-content:space-between;
-gap:15px;
-margin-top:15px;
+.login-screen {
+  text-align: center;
+  padding: 75px 20px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 18px;
 }
 
-.preview h3{
-font-size:22px;
-margin:0 0 12px;
+.login-screen h2 {
+  margin-bottom: 15px;
 }
 
-.preview p{
-color:#c2c2cf;
-margin:0;
-font-size:18px;
+.login-screen p {
+  color: var(--muted);
+  margin-bottom: 25px;
+  line-height: 1.8;
 }
 
-.preview-icon{
-width:55px;
-height:55px;
-border:4px solid #41445e;
-border-radius:10px;
-background:#aaa;
-flex-shrink:0;
+.dashboard-content {
+  display: none;
 }
 
-.hint{
-color:#888b9e;
-font-size:16px;
-line-height:1.8;
-margin-top:18px;
+.server-area {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 15px;
+  flex-wrap: wrap;
+  margin-bottom: 25px;
 }
 
-.role-box{
-min-height:75px;
-padding:12px;
-border:2px solid #34364e;
-background:#15132e;
-border-radius:10px;
-display:flex;
-align-items:center;
-justify-content:space-between;
-gap:10px;
+.server-area label {
+  color: var(--muted);
+  display: block;
+  margin-bottom: 8px;
 }
 
-.role-tag{
-background:#30303b;
-border-radius:10px;
-padding:12px 15px;
-display:flex;
-align-items:center;
-gap:15px;
-color:white;
+select, input, textarea {
+  width: 100%;
+  background: var(--panel2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 13px;
+  outline: none;
 }
 
-.role-dot{
-width:25px;
-height:25px;
-border-radius:50%;
-background:#cdb6e9;
+select:focus, input:focus, textarea:focus {
+  border-color: var(--purple);
 }
 
-.actions{
-display:flex;
-gap:20px;
+.server-select {
+  min-width: 240px;
 }
 
-.actions button{
-background:transparent;
-border:0;
-color:#ddd;
-font-size:27px;
-cursor:pointer;
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: repeat(2,minmax(0,1fr));
+  gap: 18px;
+  margin-bottom: 25px;
 }
 
-button.save{
-background:var(--purple);
-color:var(--gold);
-padding:13px 25px;
-border:1px solid #39305f;
-border-radius:10px;
-font-size:16px;
-cursor:pointer;
+.stat-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 22px;
 }
 
-.stats{
-display:grid;
-grid-template-columns:repeat(3,1fr);
-gap:15px;
-margin-bottom:30px;
+.stat-card span {
+  display: block;
+  color: var(--muted);
+  margin-bottom: 12px;
 }
 
-.stat{
-background:var(--card);
-border:1px solid var(--border);
-border-radius:17px;
-padding:22px;
+.stat-card strong {
+  color: var(--gold);
+  font-size: 23px;
 }
 
-.stat p{color:var(--muted)}
-.stat h2{color:var(--gold)}
-
-footer{
-text-align:center;
-padding:25px;
-color:#77798c;
+.section {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 25px;
+  margin-bottom: 22px;
 }
 
-/* LOGIN AND SERVER SELECTOR */
-
-#loginPanel{
-max-width:600px;
-margin:60px auto;
-padding:35px;
-background:var(--card);
-border:1px solid var(--border);
-border-radius:23px;
-text-align:center;
+.section-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 22px;
 }
 
-#loginPanel h1{
-color:var(--gold);
-font-size:30px;
+.section-icon {
+  width: 45px;
+  height: 45px;
+  border-radius: 12px;
+  background: rgba(139,92,246,.15);
+  color: var(--gold);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
 }
 
-#loginPanel p{
-color:var(--muted);
-line-height:1.8;
+.section-head h2 {
+  font-size: 19px;
+  margin-bottom: 6px;
 }
 
-.discord-login{
-display:block;
-width:100%;
-padding:18px;
-margin-top:25px;
-background:#5865F2;
-color:white;
-border:0;
-border-radius:12px;
-font-size:18px;
-font-weight:bold;
-text-decoration:none;
-cursor:pointer;
+.section-head p {
+  font-size: 13px;
+  color: var(--muted);
 }
 
-#dashboardContent{display:none}
-
-#serverArea{
-background:var(--card);
-border:1px solid var(--border);
-border-radius:17px;
-padding:20px;
-margin-bottom:25px;
+.reply-form {
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 13px;
+  padding: 18px;
+  margin-bottom: 22px;
 }
 
-#serverArea label{
-display:block;
-margin-bottom:12px;
-color:var(--gold);
+.form-group {
+  margin-bottom: 15px;
 }
 
-#serverSelect{width:100%}
-
-#userArea{
-display:flex;
-align-items:center;
-gap:10px;
-color:var(--gold);
-font-size:14px;
+.form-group label {
+  display: block;
+  margin-bottom: 9px;
+  font-size: 14px;
+  color: #d5d0e5;
 }
 
-#logoutBtn{
-background:#2b1723;
-color:#ff9a9a;
-border:1px solid #57303d;
-padding:10px 15px;
-border-radius:10px;
-cursor:pointer;
+textarea {
+  resize: vertical;
+  min-height: 110px;
+  line-height: 1.7;
 }
 
-#loginMessage{
-color:#e8c76c;
-margin-top:15px;
+.reply-message {
+  color: var(--muted);
+  font-size: 14px;
+  margin: 12px 0;
+  line-height: 1.7;
 }
 
-@media(max-width:650px){
-.header{height:60px;padding:0 9px}
-.logo{font-size:17px}
-.icon-btn{width:34px;height:34px;font-size:17px}
-.avatar{width:30px;height:30px;font-size:15px}
-
-main{padding:9px 8px 20px}
-
-.page-title{margin-bottom:12px}
-.page-title h1{font-size:17px}
-.page-title p{font-size:11px}
-.status{font-size:9px;padding:5px 7px}
-
-.section{
-padding:12px 10px;
-margin-bottom:10px;
-border-radius:11px;
+.reply-list {
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
 }
 
-.section-head{
-gap:8px;
-margin-bottom:12px;
+.reply-item {
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 17px;
 }
 
-.section-head h2{font-size:15px}
-.section-head p{font-size:10px;margin-top:3px}
-
-.section-icon{
-width:34px;
-height:34px;
-font-size:16px;
-border-radius:9px;
+.reply-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
 }
 
-.field{margin-bottom:11px}
-.field label{font-size:12px;margin-bottom:6px}
-
-select,input{
-height:36px;
-font-size:12px;
-padding:5px 9px;
+.reply-trigger {
+  color: var(--gold);
+  font-weight: bold;
+  overflow-wrap: anywhere;
 }
 
-.preview{padding:9px;border-radius:9px}
-.preview h3{font-size:13px}
-.preview p{font-size:11px}
-
-.stats{
-grid-template-columns:repeat(2,1fr);
-gap:6px;
-margin-bottom:12px;
+.reply-status {
+  font-size: 12px;
+  padding: 6px 10px;
+  border-radius: 20px;
 }
 
-.stat{
-padding:9px;
-border-radius:9px;
+.reply-status.active {
+  color: #55dfa5;
+  background: rgba(53,201,138,.12);
 }
 
-.stat p{font-size:10px}
-.stat h2{font-size:16px}
-
-.save{
-padding:9px 14px;
-font-size:12px;
+.reply-status.disabled {
+  color: #ff8585;
+  background: rgba(239,100,100,.12);
 }
 
-.hint{font-size:10px}
-.role-box{padding:8px}
-footer{padding:15px;font-size:10px}
-
-#loginPanel{
-margin:25px 8px;
-padding:20px;
+.reply-response {
+  color: #c4bfd2;
+  font-size: 14px;
+  line-height: 1.8;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin-bottom: 15px;
 }
 
-#loginPanel h1{font-size:22px}
-#loginPanel p{font-size:13px}
-.discord-login{font-size:14px;padding:13px}
+.reply-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
 
-#userArea{font-size:10px}
-#logoutBtn{font-size:11px;padding:7px}
+.reply-actions .btn {
+  padding: 9px 13px;
+  font-size: 12px;
+}
+
+.empty-state {
+  text-align: center;
+  padding: 25px;
+  color: var(--muted);
+  background: var(--panel2);
+  border-radius: 12px;
+  line-height: 1.8;
+}
+
+.hidden {
+  display: none !important;
+}
+
+.footer {
+  text-align: center;
+  color: var(--muted);
+  padding: 30px 15px;
+  font-size: 12px;
+}
+
+@media(max-width:700px) {
+  .header {
+    padding: 0 4%;
+    height: 65px;
+  }
+
+  .logo {
+    font-size: 21px;
+  }
+
+  .main {
+    width: 94%;
+    margin-top: 20px;
+  }
+
+  .welcome-box {
+    padding: 23px;
+  }
+
+  .welcome-box h1 {
+    font-size: 24px;
+  }
+
+  .panel, .section {
+    padding: 17px;
+  }
+
+  .dashboard-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .server-area {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .server-select {
+    min-width: 0;
+  }
+
+  .reply-actions .btn {
+    flex: 1;
+  }
 }
 </style>
 </head>
@@ -824,317 +1029,279 @@ padding:20px;
 <body>
 
 <header class="header">
+  <div class="logo">HERVIN</div>
 
-<div class="header-left">
-<div class="avatar">H</div>
-</div>
-
-<div class="logo">𝐇𝐄𝐑𝐕𝐈𝐍</div>
-
-<div class="header-right">
-<div id="userArea" style="display:none">
-<span id="usernameDisplay"></span>
-<button id="logoutBtn" onclick="logout()">خروج</button>
-</div>
-
-<button class="icon-btn" onclick="toggleMenu()">☰</button>
-</div>
-
-<nav class="menu" id="menu">
-<a href="#home">الرئيسية</a>
-<a href="#basics">الأساسيات</a>
-<a href="#roles">الرتب التلقائية</a>
-<a href="#security">الحماية والأمان</a>
-<a href="#moderation">الإشراف والعقوبات</a>
-<a href="#replies">الردود التلقائية</a>
-<a href="#tickets">التذاكر</a>
-<a href="#welcome">الترحيب</a>
-<a href="#levels">المستويات والنقاط</a>
-<a href="#logs">السجلات</a>
-</nav>
-
+  <div class="header-actions">
+    <button class="btn dark" onclick="logout()">
+      تسجيل الخروج
+    </button>
+  </div>
 </header>
 
-<div id="loginPanel">
-<h1>𝐇𝐄𝐑𝐕𝐈𝐍</h1>
-<p>مرحباً بك في لوحة تحكم HERVIN</p>
-<p>سجّل دخولك باستخدام Discord لإدارة السيرفرات التي تملكها أو لديك صلاحية Administrator فيها</p>
+<main class="main">
 
-<a class="discord-login" href="/auth/discord">
-تسجيل الدخول باستخدام Discord
-</a>
+  <div class="welcome-box">
+    <h1>مرحباً بك في HERVIN</h1>
+    <p>
+      لوحة التحكم الرسمية لإدارة بوت HERVIN
+      والتحكم في أنظمة السيرفر الخاص بك
+    </p>
+  </div>
 
-<p id="loginMessage"></p>
-</div>
+  <div class="login-screen" id="loginScreen">
+    <h2>تسجيل الدخول إلى HERVIN</h2>
 
-<main id="dashboardContent">
+    <p>
+      سجل دخولك باستخدام Discord للوصول إلى لوحة التحكم
+      <br>
+      يجب أن تكون مالك السيرفر أو لديك صلاحية Administrator
+    </p>
 
-<div class="page-title">
-<div>
-<h1>لوحة تحكم HERVIN</h1>
-<p>إدارة إعدادات البوت والسيرفر</p>
-</div>
-<div class="status">● الواجهة تعمل</div>
-</div>
+    <button class="btn gold" onclick="login()">
+      تسجيل الدخول عبر Discord
+    </button>
+  </div>
 
-<div id="serverArea">
-<label>السيرفر الذي تريد إدارته</label>
+  <div class="dashboard-content" id="dashboardContent">
 
-<select id="serverSelect">
-<option value="">جاري تحميل السيرفرات...</option>
-</select>
+    <div class="server-area">
+      <div>
+        <label>السيرفر المحدد</label>
 
-<p class="hint" id="serverMessage">
-اختر سيرفراً تملكه أو لديك صلاحية Administrator فيه حتى تتمكن من إدارته
-</p>
-</div>
+        <select
+          class="server-select"
+          id="serverSelect"
+          onchange="selectServer()"
+        >
+          <option value="">اختر السيرفر</option>
+        </select>
+      </div>
 
-<div class="stats">
-<div class="stat">
-<p>حالة اللوحة</p>
-<h2>نشطة</h2>
-</div>
-<div class="stat">
-<p>أنظمة البوت</p>
-<h2>9</h2>
-</div>
-<div class="stat">
-<p>الإصدار</p>
-<h2>1.0</h2>
-</div>
-</div>
+      <button class="btn dark" onclick="loadGuilds()">
+        تحديث السيرفرات
+      </button>
+    </div>
 
-<section class="section" id="basics">
-<div class="section-head">
-<div class="section-icon">⚙</div>
-<div>
-<h2>الأساسيات</h2>
-<p>إعدادات أساسية للسيرفر</p>
-</div>
-</div>
+    <div class="dashboard-grid">
 
-<div class="field">
-<label>لغة البوت</label>
-<select>
-<option>العربية 🇸🇦</option>
-<option>English 🇺🇸</option>
-</select>
-</div>
+      <div class="stat-card">
+        <span>حالة لوحة التحكم</span>
+        <strong>متصلة</strong>
+      </div>
 
-<div class="field">
-<label>لون الامبد الافتراضي</label>
-<div class="preview">
-<div>
-<h3>مثال على عنوان الامبد</h3>
-<p>مثال على وصف الامبد</p>
-</div>
-<div class="preview-icon"></div>
-</div>
-<p class="hint">
-هذا اللون سيستخدم في جميع رسائل الامبد الافتراضية من البوت
-</p>
-</div>
+      <div class="stat-card">
+        <span>النظام</span>
+        <strong>HERVIN BOT</strong>
+      </div>
 
-<button class="save">حفظ الإعدادات</button>
-</section>
+    </div>
 
-<section class="section" id="roles">
-<div class="section-head">
-<div class="section-icon">♟</div>
-<div>
-<h2>الرتب التلقائية</h2>
-<p>رتب تمنح تلقائياً للأعضاء الجدد</p>
-</div>
-</div>
+    <section class="section" id="replies">
 
-<div class="field">
-<label>👥 رتب المستخدمين</label>
-<div class="role-box">
-<div class="actions">
-<button>⌄</button>
-<button>×</button>
-</div>
-<div class="role-tag">
-<span>MEMBER</span>
-<span class="role-dot"></span>
-</div>
-</div>
-<p class="hint">الرتب التي سيحصل عليها المستخدمون الجدد تلقائياً</p>
-</div>
+      <div class="section-head">
+        <div class="section-icon">✉</div>
 
-<div class="field">
-<label>🤖 رتب البوتات</label>
-<div class="role-box">
-<div class="actions">
-<button>⌄</button>
-<button>×</button>
-</div>
-<div class="role-tag">
-<span>BOT</span>
-<span class="role-dot" style="background:#ddd"></span>
-</div>
-</div>
-<p class="hint">الرتب التي ستحصل عليها البوتات الجديدة تلقائياً</p>
-</div>
+        <div>
+          <h2>الردود التلقائية</h2>
+          <p>إدارة ردود HERVIN الذكية</p>
+        </div>
+      </div>
 
-<button class="save">حفظ الإعدادات</button>
-</section>
+      <p class="description">
+        أضف كلمات تفعيل واجعل HERVIN يرد عليها تلقائياً
+        ويمكنك تعديل الردود أو حذفها أو إيقافها
+      </p>
 
-<section class="section" id="security">
-<div class="section-head">
-<div class="section-icon">♜</div>
-<div>
-<h2>الحماية والأمان</h2>
-<p>حماية السيرفر من التخريب والغارات</p>
-</div>
-</div>
-<div class="field">
-<label>مكافحة السبام</label>
-<select><option>معطل</option><option>مفعل</option></select>
-</div>
-<div class="field">
-<label>مكافحة الغارات Anti-Raid</label>
-<select><option>معطل</option><option>مفعل</option></select>
-</div>
-</section>
+      <div class="reply-form">
 
-<section class="section" id="moderation">
-<div class="section-head">
-<div class="section-icon">⚖</div>
-<div>
-<h2>الإشراف والعقوبات</h2>
-<p>إدارة أعضاء السيرفر والعقوبات</p>
-</div>
-</div>
-<p class="hint">الحظر، الطرد، الكتم، التحذيرات وإدارة المخالفات</p>
-</section>
+        <div class="form-group">
+          <label for="replyTrigger">
+            كلمة التفعيل
+          </label>
 
-<section class="section" id="replies">
-<div class="section-head">
-<div class="section-icon">✉</div>
-<div>
-<h2>الردود التلقائية</h2>
-<p>إدارة ردود HERVIN الذكية</p>
-</div>
-</div>
-</section>
+          <input
+            id="replyTrigger"
+            type="text"
+            maxlength="80"
+            placeholder="مثال: السلام عليكم"
+          >
+        </div>
 
-<section class="section" id="tickets">
-<div class="section-head">
-<div class="section-icon">▤</div>
-<div>
-<h2>التذاكر</h2>
-<p>إعداد نظام التذاكر والدعم الفني</p>
-</div>
-</div>
-</section>
+        <div class="form-group">
+          <label for="replyResponse">
+            نص الرد
+          </label>
 
-<section class="section" id="welcome">
-<div class="section-head">
-<div class="section-icon">♔</div>
-<div>
-<h2>الترحيب</h2>
-<p>رسائل وصور الترحيب والمغادرة</p>
-</div>
-</div>
-</section>
+          <textarea
+            id="replyResponse"
+            maxlength="1900"
+            placeholder="اكتب الرد الذي سيظهر من البوت..."
+          ></textarea>
+        </div>
 
-<section class="section" id="levels">
-<div class="section-head">
-<div class="section-icon">★</div>
-<div>
-<h2>المستويات والنقاط</h2>
-<p>إعداد الخبرة والمكافآت</p>
-</div>
-</div>
-</section>
+        <div class="reply-actions">
+          <button
+            class="btn gold"
+            id="replySaveButton"
+            onclick="saveReply()"
+          >
+            إضافة الرد
+          </button>
 
-<section class="section" id="logs">
-<div class="section-head">
-<div class="section-icon">▣</div>
-<div>
-<h2>السجلات</h2>
-<p>متابعة جميع الأحداث داخل السيرفر</p>
-</div>
-</div>
-</section>
+          <button
+            class="btn dark hidden"
+            id="replyCancelButton"
+            onclick="cancelReplyEdit()"
+          >
+            إلغاء التعديل
+          </button>
+        </div>
 
-<footer>
-𝐇𝐄𝐑𝐕𝐈𝐍 © 2026
-</footer>
+        <div
+          class="reply-message"
+          id="replyMessage"
+          aria-live="polite"
+        ></div>
+
+      </div>
+
+      <h3 style="margin-bottom:15px">
+        الردود المحفوظة
+      </h3>
+
+      <div id="replyList" class="reply-list">
+
+        <div class="empty-state">
+          اختر سيرفرًا لعرض الردود
+        </div>
+
+      </div>
+
+    </section>
+
+    <section class="section">
+
+      <div class="section-head">
+        <div class="section-icon">⚙</div>
+
+        <div>
+          <h2>إعدادات HERVIN</h2>
+          <p>أقسام لوحة التحكم</p>
+        </div>
+      </div>
+
+      <div class="empty-state">
+        سيتم تفعيل بقية أنظمة لوحة التحكم وربطها
+        تدريجيًا
+      </div>
+
+    </section>
+
+  </div>
 
 </main>
 
+<footer class="footer">
+  HERVIN DASHBOARD © 2026
+</footer>
+
 <script>
-function toggleMenu(){
-  document.getElementById("menu").classList.toggle("show");
-}
 
-document.querySelectorAll(".menu a").forEach(link=>{
-  link.addEventListener("click",()=>{
-    document.getElementById("menu").classList.remove("show");
+// =====================================
+// HERVIN DASHBOARD JAVASCRIPT
+// =====================================
+
+let selectedGuildId = null;
+let replies = [];
+let editingTrigger = null;
+
+// =====================================
+// API HELPER
+// =====================================
+
+async function api(url, options = {}) {
+  const response = await fetch(url, {
+    credentials: "same-origin",
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      ...(options.headers || {})
+    }
   });
-});
 
-async function loadDashboard(){
-  const loginPanel = document.getElementById("loginPanel");
-  const dashboard = document.getElementById("dashboardContent");
-  const userArea = document.getElementById("userArea");
+  let data = {};
 
   try {
-    const response = await fetch("/api/me");
+    data = await response.json();
+  } catch {
+    data = {};
+  }
 
-    if (!response.ok) {
-      loginPanel.style.display = "block";
-      dashboard.style.display = "none";
+  if (!response.ok) {
+    throw new Error(
+      data.error || "حدث خطأ أثناء تنفيذ الطلب"
+    );
+  }
+
+  return data;
+}
+
+// =====================================
+// LOGIN
+// =====================================
+
+function login() {
+  window.location.href = "/auth/discord";
+}
+
+// =====================================
+// DASHBOARD
+// =====================================
+
+async function loadDashboard() {
+  try {
+    const data = await api("/api/me");
+
+    if (!data.loggedIn) {
+      showLogin();
       return;
     }
 
-    const data = await response.json();
+    document.getElementById("loginScreen").style.display = "none";
 
-    loginPanel.style.display = "none";
-    dashboard.style.display = "block";
-    userArea.style.display = "flex";
+    document.getElementById("dashboardContent").style.display = "block";
 
-    document.getElementById("usernameDisplay").textContent =
-      data.user.username;
-
-    await loadGuilds(data.selectedGuild?.id);
+    await loadGuilds();
 
   } catch (error) {
-    document.getElementById("loginMessage").textContent =
-      "تعذر الاتصال بالخادم، حاول تحديث الصفحة";
+    showLogin();
   }
 }
 
-async function loadGuilds(selectedId){
+function showLogin() {
+  document.getElementById("loginScreen").style.display = "block";
+
+  document.getElementById("dashboardContent").style.display = "none";
+}
+
+// =====================================
+// LOAD SERVERS
+// =====================================
+
+async function loadGuilds() {
   const select = document.getElementById("serverSelect");
-  const message = document.getElementById("serverMessage");
 
   try {
-    const response = await fetch("/api/guilds");
+    const guilds = await api("/api/guilds");
 
-    if (!response.ok) {
-      message.textContent = "تعذر تحميل السيرفرات";
-      return;
-    }
+    select.replaceChildren();
 
-    const guilds = await response.json();
+    const defaultOption = document.createElement("option");
 
-    select.innerHTML = "";
+    defaultOption.value = "";
+    defaultOption.textContent = "اختر السيرفر";
 
-    if (!guilds.length) {
-      select.innerHTML =
-        '<option value="">لا توجد سيرفرات متاحة</option>';
-
-      message.textContent =
-        "يجب أن تكون مالك السيرفر أو لديك صلاحية Administrator حتى يظهر هنا";
-
-      return;
-    }
-
-    select.innerHTML =
-      '<option value="">اختر السيرفر</option>';
+    select.appendChild(defaultOption);
 
     guilds.forEach(guild => {
       const option = document.createElement("option");
@@ -1145,68 +1312,437 @@ async function loadGuilds(selectedId){
       select.appendChild(option);
     });
 
-    if (selectedId) {
-      select.value = selectedId;
+    const me = await api("/api/me");
+
+    if (
+      me.selectedGuild &&
+      guilds.some(guild => guild.id === me.selectedGuild.id)
+    ) {
+      selectedGuildId = me.selectedGuild.id;
+      select.value = selectedGuildId;
+
+      await loadReplies();
+
+    } else {
+      selectedGuildId = null;
+      replies = [];
+
+      renderReplies();
     }
 
   } catch (error) {
-    message.textContent = "حدث خطأ أثناء تحميل السيرفرات";
+    showReplyMessage(error.message, true);
   }
 }
 
-document.getElementById("serverSelect").addEventListener(
-  "change",
-  async function(){
-    const guildId = this.value;
-    const message = document.getElementById("serverMessage");
+// =====================================
+// SELECT SERVER
+// =====================================
 
-    if (!guildId) return;
+async function selectServer() {
+  const guildId = document.getElementById("serverSelect").value;
 
-    message.textContent = "جاري التحقق من صلاحيات السيرفر...";
+  if (!guildId) {
+    selectedGuildId = null;
+    replies = [];
 
-    try {
-      const response = await fetch("/api/select-server", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({ guildId })
-      });
+    cancelReplyEdit();
+    renderReplies();
 
-      const data = await response.json();
-
-      if (!response.ok) {
-        message.textContent = data.error || "تعذر اختيار السيرفر";
-        return;
-      }
-
-      message.textContent =
-        "تم اختيار السيرفر: " + data.selectedGuild.name;
-
-    } catch (error) {
-      message.textContent = "حدث خطأ أثناء اختيار السيرفر";
-    }
+    return;
   }
-);
 
-async function logout(){
   try {
-    await fetch("/auth/logout", {
-      method: "POST"
+    await api("/api/select-server", {
+      method: "POST",
+
+      body: JSON.stringify({
+        guildId
+      })
     });
 
-    window.location.reload();
+    selectedGuildId = guildId;
+
+    cancelReplyEdit();
+
+    await loadReplies();
 
   } catch (error) {
-    alert("تعذر تسجيل الخروج");
+    showReplyMessage(error.message, true);
   }
 }
 
+// =====================================
+// LOAD REPLIES
+// =====================================
+
+async function loadReplies() {
+  const list = document.getElementById("replyList");
+
+  if (!selectedGuildId) {
+    replies = [];
+    renderReplies();
+    return;
+  }
+
+  list.textContent = "جاري تحميل الردود...";
+
+  try {
+    const data = await api("/api/replies");
+
+    replies = Array.isArray(data.replies)
+      ? data.replies
+      : [];
+
+    renderReplies();
+
+  } catch (error) {
+    list.textContent = error.message;
+  }
+}
+
+// =====================================
+// RENDER REPLIES
+// =====================================
+
+function renderReplies() {
+  const list = document.getElementById("replyList");
+
+  list.replaceChildren();
+
+  if (!selectedGuildId) {
+    const empty = document.createElement("div");
+
+    empty.className = "empty-state";
+    empty.textContent = "اختر سيرفرًا أولاً لعرض الردود";
+
+    list.appendChild(empty);
+    return;
+  }
+
+  if (!replies.length) {
+    const empty = document.createElement("div");
+
+    empty.className = "empty-state";
+    empty.textContent = "لا توجد ردود محفوظة في هذا السيرفر حتى الآن";
+
+    list.appendChild(empty);
+    return;
+  }
+
+  replies.forEach(reply => {
+    const item = document.createElement("div");
+
+    item.className = "reply-item";
+
+    const top = document.createElement("div");
+
+    top.className = "reply-top";
+
+    const trigger = document.createElement("div");
+
+    trigger.className = "reply-trigger";
+    trigger.textContent = "الكلمة: " + reply.trigger;
+
+    const status = document.createElement("span");
+
+    status.className = "reply-status " +
+      (reply.enabled === false ? "disabled" : "active");
+
+    status.textContent = reply.enabled === false
+      ? "متوقف"
+      : "مفعل";
+
+    top.append(trigger, status);
+
+    const response = document.createElement("div");
+
+    response.className = "reply-response";
+    response.textContent = reply.response;
+
+    const actions = document.createElement("div");
+
+    actions.className = "reply-actions";
+
+    const editButton = document.createElement("button");
+
+    editButton.className = "btn dark";
+    editButton.textContent = "تعديل";
+
+    editButton.addEventListener("click", () => {
+      startReplyEdit(reply);
+    });
+
+    const toggleButton = document.createElement("button");
+
+    toggleButton.className = "btn " +
+      (reply.enabled === false ? "success" : "dark");
+
+    toggleButton.textContent = reply.enabled === false
+      ? "تفعيل"
+      : "إيقاف";
+
+    toggleButton.addEventListener("click", () => {
+      toggleReply(reply);
+    });
+
+    const deleteButton = document.createElement("button");
+
+    deleteButton.className = "btn danger";
+    deleteButton.textContent = "حذف";
+
+    deleteButton.addEventListener("click", () => {
+      deleteReply(reply);
+    });
+
+    actions.append(
+      editButton,
+      toggleButton,
+      deleteButton
+    );
+
+    item.append(
+      top,
+      response,
+      actions
+    );
+
+    list.appendChild(item);
+  });
+}
+
+// =====================================
+// ADD REPLY
+// =====================================
+
+async function saveReply() {
+  const triggerInput = document.getElementById("replyTrigger");
+
+  const responseInput = document.getElementById("replyResponse");
+
+  const trigger = triggerInput.value.trim();
+
+  const response = responseInput.value.trim();
+
+  if (!selectedGuildId) {
+    showReplyMessage("اختر سيرفرًا أولاً", true);
+    return;
+  }
+
+  if (!trigger || !response) {
+    showReplyMessage("اكتب كلمة التفعيل والرد", true);
+    return;
+  }
+
+  const button = document.getElementById("replySaveButton");
+
+  button.disabled = true;
+
+  try {
+    if (editingTrigger !== null) {
+      await api("/api/replies", {
+        method: "POST",
+
+        body: JSON.stringify({
+          action: "edit",
+          oldTrigger: editingTrigger,
+          trigger,
+          response
+        })
+      });
+
+      showReplyMessage("تم تعديل الرد بنجاح");
+
+    } else {
+      await api("/api/replies", {
+        method: "POST",
+
+        body: JSON.stringify({
+          action: "add",
+          trigger,
+          response
+        })
+      });
+
+      showReplyMessage("تمت إضافة الرد بنجاح");
+    }
+
+    triggerInput.value = "";
+    responseInput.value = "";
+
+    cancelReplyEdit();
+
+    await loadReplies();
+
+  } catch (error) {
+    showReplyMessage(error.message, true);
+
+  } finally {
+    button.disabled = false;
+  }
+}
+
+// =====================================
+// EDIT REPLY
+// =====================================
+
+function startReplyEdit(reply) {
+  editingTrigger = reply.trigger;
+
+  document.getElementById("replyTrigger").value = reply.trigger;
+
+  document.getElementById("replyResponse").value = reply.response;
+
+  document.getElementById("replySaveButton").textContent = "حفظ التعديل";
+
+  document.getElementById("replyCancelButton").classList.remove("hidden");
+
+  showReplyMessage("أنت الآن تعدل الرد المحدد");
+}
+
+function cancelReplyEdit() {
+  editingTrigger = null;
+
+  document.getElementById("replyTrigger").value = "";
+
+  document.getElementById("replyResponse").value = "";
+
+  document.getElementById("replySaveButton").textContent = "إضافة الرد";
+
+  document.getElementById("replyCancelButton").classList.add("hidden");
+}
+
+// =====================================
+// TOGGLE REPLY
+// =====================================
+
+async function toggleReply(reply) {
+  try {
+    await api("/api/replies", {
+      method: "POST",
+
+      body: JSON.stringify({
+        action: "toggle",
+        trigger: reply.trigger,
+        enabled: reply.enabled === false
+      })
+    });
+
+    showReplyMessage("تم تحديث حالة الرد");
+
+    await loadReplies();
+
+  } catch (error) {
+    showReplyMessage(error.message, true);
+  }
+}
+
+// =====================================
+// DELETE REPLY
+// =====================================
+
+async function deleteReply(reply) {
+  const confirmed = confirm(
+    "هل أنت متأكد من حذف الرد: " + reply.trigger + " ؟"
+  );
+
+  if (!confirmed) return;
+
+  try {
+    await api("/api/replies", {
+      method: "POST",
+
+      body: JSON.stringify({
+        action: "delete",
+        trigger: reply.trigger
+      })
+    });
+
+    if (editingTrigger === reply.trigger) {
+      cancelReplyEdit();
+    }
+
+    showReplyMessage("تم حذف الرد بنجاح");
+
+    await loadReplies();
+
+  } catch (error) {
+    showReplyMessage(error.message, true);
+  }
+}
+
+// =====================================
+// STATUS MESSAGE
+// =====================================
+
+function showReplyMessage(message, isError = false) {
+  const element = document.getElementById("replyMessage");
+
+  element.textContent = message;
+
+  element.style.color = isError
+    ? "#ff8585"
+    : "#55dfa5";
+}
+
+// =====================================
+// LOGOUT
+// =====================================
+
+async function logout() {
+  try {
+    await fetch("/auth/logout", {
+      method: "POST",
+      credentials: "same-origin"
+    });
+  } catch (error) {
+    console.error("Logout error:", error);
+  }
+
+  window.location.href = "/";
+}
+
+// =====================================
+// START
+// =====================================
+
 loadDashboard();
+
 </script>
 
 </body>
 </html>`);
+});
+
+// =====================================
+// LOGOUT API
+// =====================================
+
+app.post("/auth/logout", (req, res) => {
+  const session = getSession(req);
+
+  if (session) {
+    const cookies = req.headers.cookie || "";
+
+    const match = cookies.match(
+      /(?:^|;\s*)hervin_session=([^;]+)/
+    );
+
+    if (match) {
+      const sessionId = match[1].split(".")[0];
+
+      sessions.delete(sessionId);
+    }
+  }
+
+  res.setHeader(
+    "Set-Cookie",
+    "hervin_session=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0"
+  );
+
+  res.json({
+    success: true
+  });
 });
 
 // =====================================
