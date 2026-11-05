@@ -588,7 +588,381 @@ app.post("/api/replies", requireSession, (req, res) => {
     });
   }
 });
+// =====================================
+// HERVIN WELCOME SETTINGS API
+// =====================================
 
+const welcomeConfigFile = path.join(
+  __dirname,
+  "systems",
+  "welcome.json"
+);
+
+function loadWelcomeConfig() {
+  try {
+    if (!fs.existsSync(welcomeConfigFile)) return {};
+
+    const data = JSON.parse(
+      fs.readFileSync(welcomeConfigFile, "utf8")
+    );
+
+    return data &&
+      typeof data === "object" &&
+      !Array.isArray(data)
+      ? data
+      : {};
+  } catch (error) {
+    console.error("HERVIN Welcome Config Error:", error);
+    return {};
+  }
+}
+
+function saveWelcomeConfig(data) {
+  fs.writeFileSync(
+    welcomeConfigFile,
+    JSON.stringify(data, null, 2),
+    "utf8"
+  );
+}
+
+function validDiscordId(id) {
+  return typeof id === "string" &&
+    /^\d{17,20}$/.test(id);
+}
+
+// =====================================
+// GET SERVER ROLES AND CHANNELS
+// =====================================
+
+app.get(
+  "/api/welcome-options",
+  requireSession,
+  async (req, res) => {
+    const guild = getSelectedGuild(req);
+
+    if (!guild) {
+      return res.status(403).json({
+        error: "اختر سيرفرًا تملك صلاحية إدارته"
+      });
+    }
+
+    if (!process.env.DISCORD_TOKEN) {
+      return res.status(500).json({
+        error: "إعدادات البوت غير مكتملة"
+      });
+    }
+
+    try {
+      const headers = {
+        Authorization: `Bot ${process.env.DISCORD_TOKEN}`
+      };
+
+      const [rolesResponse, channelsResponse] =
+        await Promise.all([
+          fetch(
+            `https://discord.com/api/v10/guilds/${guild.id}/roles`,
+            { headers }
+          ),
+          fetch(
+            `https://discord.com/api/v10/guilds/${guild.id}/channels`,
+            { headers }
+          )
+        ]);
+
+      if (!rolesResponse.ok || !channelsResponse.ok) {
+        return res.status(400).json({
+          error: "تعذر جلب الرتب والقنوات، تأكد أن البوت موجود في السيرفر"
+        });
+      }
+
+      const [roles, channels] = await Promise.all([
+        rolesResponse.json(),
+        channelsResponse.json()
+      ]);
+
+      res.json({
+        success: true,
+
+        roles: roles
+          .filter(role =>
+            !role.managed &&
+            role.id !== guild.id
+          )
+          .map(role => ({
+            id: role.id,
+            name: role.name,
+            position: role.position
+          })),
+
+        channels: channels
+          .filter(channel =>
+            channel.type === 0 ||
+            channel.type === 5
+          )
+          .map(channel => ({
+            id: channel.id,
+            name: channel.name
+          }))
+      });
+
+    } catch (error) {
+      console.error("HERVIN Welcome Options Error:", error);
+
+      res.status(500).json({
+        error: "حدث خطأ أثناء تحميل إعدادات السيرفر"
+      });
+    }
+  }
+);
+
+// =====================================
+// GET WELCOME SETTINGS
+// =====================================
+
+app.get(
+  "/api/welcome-settings",
+  requireSession,
+  (req, res) => {
+    const guild = getSelectedGuild(req);
+
+    if (!guild) {
+      return res.status(403).json({
+        error: "اختر سيرفرًا أولاً"
+      });
+    }
+
+    const data = loadWelcomeConfig();
+    const config = data[guild.id] || {};
+
+    res.json({
+      success: true,
+
+      settings: {
+        memberRoleId: config.memberRoleId || "",
+        botRoleId: config.botRoleId || "",
+
+        joinLogChannelId:
+          config.joinLogChannelId || "",
+
+        leaveLogChannelId:
+          config.leaveLogChannelId || "",
+
+        welcomeChannelId:
+          config.welcome?.channelId || "",
+
+        welcomeMessage:
+          config.welcome?.message ||
+          "أهلًا وسهلًا {user} في سيرفر {server} 🎉\nأنت العضو رقم {memberCount}",
+
+        leaveChannelId:
+          config.leave?.channelId || "",
+
+        leaveMessage:
+          config.leave?.message ||
+          "غادرنا {username} من سيرفر {server} 👋"
+      }
+    });
+  }
+);
+
+// =====================================
+// SAVE WELCOME SETTINGS
+// =====================================
+
+app.post(
+  "/api/welcome-settings",
+  requireSession,
+  async (req, res) => {
+    const guild = getSelectedGuild(req);
+
+    if (!guild) {
+      return res.status(403).json({
+        error: "ليس لديك صلاحية إدارة السيرفر"
+      });
+    }
+
+    try {
+      const body = req.body || {};
+
+      const fields = [
+        "memberRoleId",
+        "botRoleId",
+        "joinLogChannelId",
+        "leaveLogChannelId",
+        "welcomeChannelId",
+        "leaveChannelId"
+      ];
+
+      for (const field of fields) {
+        const value = body[field];
+
+        if (
+          value !== "" &&
+          value !== null &&
+          value !== undefined &&
+          !validDiscordId(value)
+        ) {
+          return res.status(400).json({
+            error: `قيمة غير صحيحة في ${field}`
+          });
+        }
+      }
+
+      const welcomeMessage =
+        typeof body.welcomeMessage === "string"
+          ? body.welcomeMessage.trim()
+          : "";
+
+      const leaveMessage =
+        typeof body.leaveMessage === "string"
+          ? body.leaveMessage.trim()
+          : "";
+
+      if (
+        welcomeMessage.length > 1000 ||
+        leaveMessage.length > 1000
+      ) {
+        return res.status(400).json({
+          error: "الرسالة يجب ألا تتجاوز 1000 حرف"
+        });
+      }
+
+      if (
+        body.welcomeChannelId &&
+        !welcomeMessage
+      ) {
+        return res.status(400).json({
+          error: "اكتب رسالة الترحيب"
+        });
+      }
+
+      if (
+        body.leaveChannelId &&
+        !leaveMessage
+      ) {
+        return res.status(400).json({
+          error: "اكتب رسالة المغادرة"
+        });
+      }
+
+      // التحقق من أن الرتب والقنوات تابعة للسيرفر المحدد
+      const headers = {
+        Authorization: `Bot ${process.env.DISCORD_TOKEN}`
+      };
+
+      const [rolesResponse, channelsResponse] =
+        await Promise.all([
+          fetch(
+            `https://discord.com/api/v10/guilds/${guild.id}/roles`,
+            { headers }
+          ),
+          fetch(
+            `https://discord.com/api/v10/guilds/${guild.id}/channels`,
+            { headers }
+          )
+        ]);
+
+      if (!rolesResponse.ok || !channelsResponse.ok) {
+        return res.status(400).json({
+          error: "تعذر التحقق من رتب وقنوات السيرفر"
+        });
+      }
+
+      const [roles, channels] = await Promise.all([
+        rolesResponse.json(),
+        channelsResponse.json()
+      ]);
+
+      const roleIds = new Set(
+        roles
+          .filter(role =>
+            !role.managed &&
+            role.id !== guild.id
+          )
+          .map(role => role.id)
+      );
+
+      const textChannelIds = new Set(
+        channels
+          .filter(channel =>
+            channel.type === 0 ||
+            channel.type === 5
+          )
+          .map(channel => channel.id)
+      );
+
+      for (const field of [
+        "memberRoleId",
+        "botRoleId"
+      ]) {
+        if (body[field] && !roleIds.has(body[field])) {
+          return res.status(400).json({
+            error: "الرتبة المحددة غير موجودة في السيرفر"
+          });
+        }
+      }
+
+      for (const field of [
+        "joinLogChannelId",
+        "leaveLogChannelId",
+        "welcomeChannelId",
+        "leaveChannelId"
+      ]) {
+        if (
+          body[field] &&
+          !textChannelIds.has(body[field])
+        ) {
+          return res.status(400).json({
+            error: "القناة المحددة غير موجودة في السيرفر"
+          });
+        }
+      }
+
+      const data = loadWelcomeConfig();
+
+      if (!data[guild.id]) {
+        data[guild.id] = {};
+      }
+
+      const config = data[guild.id];
+
+      config.memberRoleId = body.memberRoleId || "";
+      config.botRoleId = body.botRoleId || "";
+
+      config.joinLogChannelId =
+        body.joinLogChannelId || "";
+
+      config.leaveLogChannelId =
+        body.leaveLogChannelId || "";
+
+      config.welcome = {
+        channelId: body.welcomeChannelId || "",
+        message: welcomeMessage ||
+          "أهلًا وسهلًا {user} في سيرفر {server} 🎉\nأنت العضو رقم {memberCount}"
+      };
+
+      config.leave = {
+        channelId: body.leaveChannelId || "",
+        message: leaveMessage ||
+          "غادرنا {username} من سيرفر {server} 👋"
+      };
+
+      saveWelcomeConfig(data);
+
+      res.json({
+        success: true,
+        message: "تم حفظ إعدادات الترحيب والرتب واللوقات بنجاح"
+      });
+
+    } catch (error) {
+      console.error("HERVIN Welcome Save Error:", error);
+
+      res.status(500).json({
+        error: "حدث خطأ أثناء حفظ الإعدادات"
+      });
+    }
+  }
+);
 // =====================================
 // HERVIN DASHBOARD
 // =====================================
