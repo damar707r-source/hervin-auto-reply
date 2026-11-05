@@ -1,3 +1,4 @@
+
 const express = require("express");
 const crypto = require("crypto");
 
@@ -80,6 +81,24 @@ function getSession(req) {
   }
 
   return session;
+}
+
+// =====================================
+// HERVIN SERVER ACCESS CHECK
+// OWNER OR ADMINISTRATOR
+// =====================================
+
+function canManageGuild(guild) {
+  if (guild.owner === true) return true;
+
+  try {
+    const permissions = BigInt(guild.permissions || "0");
+
+    // Discord Administrator permission
+    return (permissions & 8n) === 8n;
+  } catch {
+    return false;
+  }
 }
 
 function requireSession(req, res, next) {
@@ -203,10 +222,8 @@ app.get("/auth/discord/callback", async (req, res) => {
     const user = await userResponse.json();
     const allGuilds = await guildsResponse.json();
 
-    // السيرفرات التي المستخدم مالكها فقط
-    const ownedGuilds = allGuilds.filter(
-      guild => guild.owner === true
-    );
+    // السيرفرات التي المستخدم مالكها أو لديه Administrator فيها
+    const ownedGuilds = allGuilds.filter(canManageGuild);
 
     const sessionId = crypto.randomBytes(32).toString("hex");
     const signature = createSignature(sessionId);
@@ -254,18 +271,21 @@ app.get("/api/me", requireSession, (req, res) => {
 });
 
 // =====================================
-// GET OWNED SERVERS
+// GET MANAGEABLE SERVERS
+// OWNER OR ADMINISTRATOR
 // =====================================
 
 app.get("/api/guilds", requireSession, (req, res) => {
   const session = req.hervinSession;
 
   res.json(
-    session.guilds.map(guild => ({
-      id: guild.id,
-      name: guild.name,
-      icon: guild.icon
-    }))
+    session.guilds
+      .filter(canManageGuild)
+      .map(guild => ({
+        id: guild.id,
+        name: guild.name,
+        icon: guild.icon
+      }))
   );
 });
 
@@ -284,7 +304,7 @@ app.post("/api/select-server", requireSession, (req, res) => {
   }
 
   const guild = session.guilds.find(
-    item => item.id === guildId && item.owner === true
+    item => item.id === guildId && canManageGuild(item)
   );
 
   if (!guild) {
@@ -838,7 +858,7 @@ padding:20px;
 <div id="loginPanel">
 <h1>𝐇𝐄𝐑𝐕𝐈𝐍</h1>
 <p>مرحباً بك في لوحة تحكم HERVIN</p>
-<p>سجّل دخولك باستخدام Discord لإدارة السيرفرات التي تملكها</p>
+<p>سجّل دخولك باستخدام Discord لإدارة السيرفرات التي تملكها أو لديك صلاحية Administrator فيها</p>
 
 <a class="discord-login" href="/auth/discord">
 تسجيل الدخول باستخدام Discord
@@ -865,7 +885,7 @@ padding:20px;
 </select>
 
 <p class="hint" id="serverMessage">
-اختر سيرفراً تملكه حتى تتمكن من إدارته
+اختر سيرفراً تملكه أو لديك صلاحية Administrator فيه حتى تتمكن من إدارته
 </p>
 </div>
 
@@ -1105,10 +1125,10 @@ async function loadGuilds(selectedId){
 
     if (!guilds.length) {
       select.innerHTML =
-        '<option value="">لا تملك أي سيرفرات</option>';
+        '<option value="">لا توجد سيرفرات متاحة</option>';
 
       message.textContent =
-        "يجب أن تكون مالك السيرفر حتى يظهر هنا";
+        "يجب أن تكون مالك السيرفر أو لديك صلاحية Administrator حتى يظهر هنا";
 
       return;
     }
@@ -1142,7 +1162,7 @@ document.getElementById("serverSelect").addEventListener(
 
     if (!guildId) return;
 
-    message.textContent = "جاري التحقق من ملكية السيرفر...";
+    message.textContent = "جاري التحقق من صلاحيات السيرفر...";
 
     try {
       const response = await fetch("/api/select-server", {
