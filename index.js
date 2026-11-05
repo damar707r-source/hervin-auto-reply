@@ -14,6 +14,7 @@ const path = require("path");
 const tickets = require("./systems/tickets");
 const security = require("./systems/security");
 const welcome = require("./systems/welcome");
+const moderation = require("./systems/moderation");
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
@@ -114,15 +115,13 @@ const commands = [
     .setDefaultMemberPermissions(admin)
 ].map(command => command.toJSON());
 
-// تسجيل أوامر التذاكر
+// تسجيل أوامر الأنظمة
 tickets.registerTicketCommands(commands);
-
-// تسجيل أوامر الحماية
 security.registerSecurityCommands(commands);
-
-// تسجيل أوامر الترحيب والمغادرة
 welcome.registerWelcomeCommands(commands);
+moderation.registerModerationCommands(commands);
 
+// إنشاء البوت
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -133,10 +132,8 @@ const client = new Client({
   ]
 });
 
-// تشغيل نظام الحماية
+// تشغيل الأنظمة
 security.initializeSecurity(client);
-
-// تشغيل نظام الترحيب والمغادرة
 welcome.initializeWelcome(client);
 
 client.once("ready", () => {
@@ -146,6 +143,9 @@ client.once("ready", () => {
 // استقبال الأوامر والأزرار
 client.on("interactionCreate", async interaction => {
   try {
+    // نظام الإشراف
+    if (await moderation.handleModerationInteraction(interaction)) return;
+
     // نظام الترحيب والمغادرة
     if (await welcome.handleWelcomeInteraction(interaction)) return;
 
@@ -195,7 +195,16 @@ client.on("interactionCreate", async interaction => {
           "**Welcome System**\n" +
           "`/welcome-setup` - Setup welcome messages\n" +
           "`/leave-setup` - Setup leave messages\n" +
-          "`/welcome-status` - Welcome settings",
+          "`/welcome-status` - Welcome settings\n\n" +
+
+          "**Moderation System**\n" +
+          "`/ban` - Ban member\n" +
+          "`/unban` - Unban member\n" +
+          "`/kick` - Kick member\n" +
+          "`/timeout` - Timeout member\n" +
+          "`/warn` - Warn member\n" +
+          "`/warnings` - Show warnings\n" +
+          "`/clear` - Clear messages",
 
         ephemeral: true
       });
