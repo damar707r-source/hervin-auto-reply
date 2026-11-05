@@ -655,7 +655,6 @@ async function transcriptTicket(interaction) {
 // =====================================
 // CLAIM TICKET
 // =====================================
-
 async function claimTicket(interaction) {
   const config = getConfig(interaction.guildId);
 
@@ -673,6 +672,8 @@ async function claimTicket(interaction) {
     });
   }
 
+  if (interaction.deferred || interaction.replied) return;
+
   const currentClaim = getClaimedBy(interaction.channel);
 
   if (currentClaim) {
@@ -682,21 +683,32 @@ async function claimTicket(interaction) {
     });
   }
 
-  const newTopic = setTopicValue(
-    interaction.channel.topic || "",
-    "CLAIMED",
-    interaction.user.id
-  );
+  await interaction.deferReply({ ephemeral: true });
 
-  await interaction.channel.setTopic(newTopic);
+  try {
+    const newTopic = setTopicValue(
+      interaction.channel.topic || "",
+      "CLAIMED",
+      interaction.user.id
+    );
 
-  await interaction.reply({
-    content: `تم استلام التذكرة بواسطة ${interaction.user} ✅`
-  });
+    await interaction.channel.setTopic(newTopic);
 
-  await interaction.channel.send(
-    `🙋 أصبح ${interaction.user} مسؤولًا عن متابعة هذه التذكرة.`
-  );
+    await interaction.editReply({
+      content: `تم استلام التذكرة بواسطة ${interaction.user} ✅`
+    });
+
+    await interaction.channel.send(
+      `🙋 أصبح ${interaction.user} مسؤولًا عن متابعة هذه التذكرة.`
+    );
+
+  } catch (error) {
+    console.error("HERVIN Claim Ticket Error:", error);
+
+    await interaction.editReply({
+      content: "حدث خطأ أثناء استلام التذكرة."
+    }).catch(() => {});
+  }
 }
 
 // =====================================
@@ -723,32 +735,37 @@ async function closeTicket(interaction) {
     });
   }
 
+  if (interaction.deferred || interaction.replied) return;
+
   await interaction.deferUpdate();
 
-  await interaction.channel.permissionOverwrites.edit(ownerId, {
-    SendMessages: false
-  });
+  try {
+    await interaction.channel.permissionOverwrites.edit(ownerId, {
+      SendMessages: false
+    });
 
-  if (!interaction.channel.name.startsWith("closed-")) {
-    await interaction.channel.setName(
-      `closed-${interaction.channel.name.replace(/^ticket-/, "")}`
-        .slice(0, 100)
+    if (!interaction.channel.name.startsWith("closed-")) {
+      await interaction.channel.setName(
+        `closed-${interaction.channel.name.replace(/^ticket-/, "")}`
+          .slice(0, 100)
+      );
+    }
+
+    await interaction.message.edit({
+      components: [closedTicketButtons()]
+    });
+
+    await interaction.channel.send(
+      `🔒 تم إغلاق التذكرة بواسطة ${interaction.user}`
     );
+
+  } catch (error) {
+    console.error("HERVIN Close Ticket Error:", error);
   }
-
-  await interaction.message.edit({
-    components: [closedTicketButtons()]
-  });
-
-  await interaction.channel.send(
-    `🔒 تم إغلاق التذكرة بواسطة ${interaction.user}`
-  );
 }
-
 // =====================================
 // REOPEN TICKET
 // =====================================
-
 async function reopenTicket(interaction) {
   const ownerId = getTicketOwner(interaction.channel);
   const config = getConfig(interaction.guildId);
@@ -760,26 +777,33 @@ async function reopenTicket(interaction) {
     });
   }
 
+  if (interaction.deferred || interaction.replied) return;
+
   await interaction.deferUpdate();
 
-  await interaction.channel.permissionOverwrites.edit(ownerId, {
-    ViewChannel: true,
-    SendMessages: true,
-    ReadMessageHistory: true,
-    AttachFiles: true
-  });
+  try {
+    await interaction.channel.permissionOverwrites.edit(ownerId, {
+      ViewChannel: true,
+      SendMessages: true,
+      ReadMessageHistory: true,
+      AttachFiles: true
+    });
 
-  await interaction.channel.setName(
-    interaction.channel.name.replace(/^closed-/, "ticket-").slice(0, 100)
-  );
+    await interaction.channel.setName(
+      interaction.channel.name.replace(/^closed-/, "ticket-").slice(0, 100)
+    );
 
-  await interaction.message.edit({
-    components: [ticketButtons()]
-  });
+    await interaction.message.edit({
+      components: [ticketButtons()]
+    });
 
-  await interaction.channel.send(
-    `🔓 تمت إعادة فتح التذكرة بواسطة ${interaction.user}`
-  );
+    await interaction.channel.send(
+      `🔓 تمت إعادة فتح التذكرة بواسطة ${interaction.user}`
+    );
+
+  } catch (error) {
+    console.error("HERVIN Reopen Ticket Error:", error);
+  }
 }
 
 // =====================================
@@ -854,7 +878,6 @@ async function removeMember(interaction, member) {
 // =====================================
 // DELETE TICKET
 // =====================================
-
 async function deleteTicket(interaction) {
   const config = getConfig(interaction.guildId);
 
@@ -872,26 +895,32 @@ async function deleteTicket(interaction) {
     });
   }
 
+  if (interaction.deferred || interaction.replied) return;
+
   await interaction.reply({
     content: "سيتم حذف التذكرة خلال 5 ثوانٍ 🗑️",
     ephemeral: true
   });
 
+  const channel = interaction.channel;
+  const guild = interaction.guild;
+
   setTimeout(async () => {
     try {
       const logsChannel = config?.logsChannelId
-        ? interaction.guild.channels.cache.get(config.logsChannelId)
+        ? guild.channels.cache.get(config.logsChannelId)
         : null;
 
       if (logsChannel) {
         try {
-          await sendTranscript(interaction.channel, logsChannel);
+          await sendTranscript(channel, logsChannel);
         } catch (error) {
           console.error("Auto Transcript Error:", error);
         }
       }
 
-      await interaction.channel.delete("HERVIN ticket deleted");
+      await channel.delete("HERVIN ticket deleted");
+
     } catch (error) {
       console.error("Ticket Delete Error:", error);
     }
