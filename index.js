@@ -19,6 +19,7 @@ const tickets = require("./systems/tickets");
 const security = require("./systems/security");
 const welcome = require("./systems/welcome");
 const moderation = require("./systems/moderation");
+const autoReplies = require("./systems/autoReplies");
 
 // =====================================
 // CONFIGURATION
@@ -33,97 +34,127 @@ if (!TOKEN || !CLIENT_ID) {
 }
 
 const file = path.join(__dirname, "replies.json");
-const tempFile = file + ".tmp";
 
 const admin = PermissionFlagsBits.ManageGuild;
 
 // =====================================
-// AUTO REPLY STORAGE
+// AUTO REPLY HELPERS
 // =====================================
 
-let repliesCache = {};
-
-function load() {
-  try {
-    if (!fs.existsSync(file)) {
-      repliesCache = {};
-      return repliesCache;
-    }
-
-    const raw = fs.readFileSync(file, "utf8");
-    const data = JSON.parse(raw);
-
-    if (
-      !data ||
-      typeof data !== "object" ||
-      Array.isArray(data)
-    ) {
-      throw new Error("Invalid replies.json format");
-    }
-
-    repliesCache = data;
-    return repliesCache;
-
-  } catch (error) {
-    console.error("[HERVIN] Replies load error:", error);
-
-    return repliesCache;
-  }
+function normalizeTrigger(trigger) {
+  return String(trigger || "").trim().toLowerCase();
 }
-
-function save(data) {
-  try {
-    const json = JSON.stringify(data, null, 2);
-
-    fs.writeFileSync(tempFile, json, "utf8");
-    fs.renameSync(tempFile, file);
-
-    repliesCache = data;
-
-    return true;
-
-  } catch (error) {
-    console.error("[HERVIN] Replies save error:", error);
-
-    try {
-      if (fs.existsSync(tempFile)) {
-        fs.unlinkSync(tempFile);
-      }
-    } catch {}
-
-    throw error;
-  }
-}
-
-// Load once when starting
-load();
-
-// =====================================
-// HELPERS
-// =====================================
 
 function getGuildReplies(guildId) {
-  const guildData = repliesCache[guildId];
+  return Object.entries(autoReplies.getAllReplies())
+    .filter(([id, reply]) =>
+      reply &&
+      reply.guildId === guildId &&
+      typeof reply === "object"
+    )
+    .map(([id, reply]) => ({
+      id,
+      ...reply
+    }));
+}
 
-  if (
-    !guildData ||
-    typeof guildData !== "object" ||
-    Array.isArray(guildData)
-  ) {
-    return [];
-  }
+function findGuildReply(guildId, trigger) {
+  const normalized = normalizeTrigger(trigger);
 
-  return Object.values(guildData).filter(reply =>
-    reply &&
-    typeof reply.trigger === "string" &&
-    typeof reply.response === "string" &&
-    reply.trigger.trim().length > 0 &&
-    reply.response.trim().length > 0
+  return getGuildReplies(guildId).find(reply =>
+    normalizeTrigger(
+      Array.isArray(reply.triggers)
+        ? reply.triggers[0]
+        : reply.trigger
+    ) === normalized
   );
 }
 
-function normalizeTrigger(trigger) {
-  return trigger.trim().toLowerCase();
+function getReplyId(guildId, trigger) {
+  return `guild:${guildId}:${normalizeTrigger(trigger)}`;
+}
+
+async function migrateLegacyReplies() {
+  try {
+    if (!fs.existsSync(file)) return;
+
+    const raw = fs.readFileSync(file, "utf8");
+    const oldData = JSON.parse(raw || "{}");
+
+    if (
+      !oldData ||
+      typeof oldData !== "object" ||
+      Array.isArray(oldData)
+    ) {
+      return;
+    }
+
+    let migrated = 0;
+
+    for (const [guildId, guildData] of Object.entries(oldData)) {
+
+      // Legacy Discord guild IDs are numeric snowflakes
+      if (!/^\d{17,20}$/.test(guildId)) continue;
+
+      if (
+        !guildData ||
+        typeof guildData !== "object" ||
+        Array.isArray(guildData)
+      ) {
+        continue;
+      }
+
+      for (const [key, oldReply] of Object.entries(guildData)) {
+        if (
+          !oldReply ||
+          typeof oldReply !== "object" ||
+          typeof oldReply.trigger !== "string" ||
+          typeof oldReply.response !== "string"
+        ) {
+          continue;
+        }
+
+        const trigger = oldReply.trigger.trim();
+        const response = oldReply.response.trim();
+
+        if (!trigger || !response) continue;
+
+        const replyId = getReplyId(guildId, trigger);
+
+        if (autoReplies.getReply(replyId)) continue;
+
+        await autoReplies.addReply(replyId, {
+          guildId,
+          trigger,
+          triggers: [trigger],
+          response,
+          responses: [response],
+          enabled: oldReply.enabled !== false,
+          priority: 1,
+          matchMode: "contains",
+          randomResponse: false,
+          chance: 100,
+          cooldown: 0,
+          conditions: {},
+          options: {
+            replyToMessage: true,
+            embed: false
+          }
+        });
+
+        migrated++;
+      }
+    }
+
+    if (migrated > 0) {
+      console.log(
+        `[HERVIN] Migrated ${migrated} legacy replies successfully.`
+      );
+    }
+
+  } catch (error) {
+    console.error("[HERVIN] Legacy replies migration error:", error);
+  }
 }
 
 function safeError(label, error) {
@@ -239,6 +270,7 @@ const client = new Client({
 
 security.initializeSecurity(client);
 welcome.initializeWelcome(client);
+autoReplies.initializeAutoReplies(client);
 
 // =====================================
 // READY
@@ -382,23 +414,14 @@ client.on("interactionCreate", async interaction => {
       );
     }
 
-    const data = {
-      ...repliesCache
-    };
-
-    if (
-      !data[guildId] ||
-      typeof data[guildId] !== "object" ||
-      Array.isArray(data[guildId])
-    ) {
-      data[guildId] = {};
-    }
-
     const trigger = interaction.options
       .getString("trigger")?.trim();
 
-    const key = trigger
-      ? normalizeTrigger(trigger)
+    const response = interaction.options
+      .getString("response")?.trim();
+
+    const reply = trigger
+      ? findGuildReply(guildId, trigger)
       : null;
 
     // =================================
@@ -408,9 +431,6 @@ client.on("interactionCreate", async interaction => {
     switch (interaction.commandName) {
 
       case "addreply": {
-        const response = interaction.options
-          .getString("response")?.trim();
-
         if (
           !trigger ||
           !response ||
@@ -422,19 +442,32 @@ client.on("interactionCreate", async interaction => {
           );
         }
 
-        if (data[guildId][key]) {
+        if (reply) {
           return interaction.editReply(
             "هذه الكلمة موجودة مسبقًا. استخدم /edit لتعديل الرد."
           );
         }
 
-        data[guildId][key] = {
-          trigger,
-          response,
-          enabled: true
-        };
+        const replyId = getReplyId(guildId, trigger);
 
-        save(data);
+        await autoReplies.addReply(replyId, {
+          guildId,
+          trigger,
+          triggers: [trigger],
+          response,
+          responses: [response],
+          enabled: true,
+          priority: 1,
+          matchMode: "contains",
+          randomResponse: false,
+          chance: 100,
+          cooldown: 0,
+          conditions: {},
+          options: {
+            replyToMessage: true,
+            embed: false
+          }
+        });
 
         return interaction.editReply(
           `تمت إضافة الرد بنجاح ✅\nالكلمة: ${trigger}`
@@ -446,7 +479,7 @@ client.on("interactionCreate", async interaction => {
       // =================================
 
       case "listreplies": {
-        const replies = Object.values(data[guildId]);
+        const replies = getGuildReplies(guildId);
 
         if (!replies.length) {
           return interaction.editReply(
@@ -454,10 +487,20 @@ client.on("interactionCreate", async interaction => {
           );
         }
 
-        const output = replies.map(reply =>
-          `${reply.enabled === false ? "🔴" : "🟢"} ` +
-          `${reply.trigger} → ${reply.response}`
-        ).join("\n");
+        const output = replies.map(reply => {
+          const trigger = reply.trigger ||
+            reply.triggers?.[0] ||
+            "بدون كلمة";
+
+          const response = reply.response ||
+            reply.responses?.[0] ||
+            "بدون رد";
+
+          return (
+            `${reply.enabled === false ? "🔴" : "🟢"} ` +
+            `${trigger} → ${response}`
+          );
+        }).join("\n");
 
         return interaction.editReply(
           output.length > 1900
@@ -471,15 +514,13 @@ client.on("interactionCreate", async interaction => {
       // =================================
 
       case "removereply": {
-        if (!data[guildId][key]) {
+        if (!reply) {
           return interaction.editReply(
             "الرد غير موجود."
           );
         }
 
-        delete data[guildId][key];
-
-        save(data);
+        await autoReplies.removeReply(reply.id);
 
         return interaction.editReply(
           "تم حذف الرد بنجاح ✅"
@@ -491,17 +532,21 @@ client.on("interactionCreate", async interaction => {
       // =================================
 
       case "display": {
-        const reply = data[guildId][key];
-
         if (!reply) {
           return interaction.editReply(
             "الرد غير موجود."
           );
         }
 
+        const triggerName = reply.trigger ||
+          reply.triggers?.[0];
+
+        const responseText = reply.response ||
+          reply.responses?.[0];
+
         return interaction.editReply(
-          `**الكلمة:** ${reply.trigger}\n` +
-          `**الاستجابة:** ${reply.response}\n` +
+          `**الكلمة:** ${triggerName}\n` +
+          `**الاستجابة:** ${responseText}\n` +
           `**الحالة:** ${reply.enabled === false ? "معطل 🔴" : "مفعل 🟢"}`
         );
       }
@@ -511,16 +556,11 @@ client.on("interactionCreate", async interaction => {
       // =================================
 
       case "edit": {
-        const reply = data[guildId][key];
-
         if (!reply) {
           return interaction.editReply(
             "الرد غير موجود."
           );
         }
-
-        const response = interaction.options
-          .getString("response")?.trim();
 
         if (!response || response.length > 1900) {
           return interaction.editReply(
@@ -528,9 +568,11 @@ client.on("interactionCreate", async interaction => {
           );
         }
 
-        reply.response = response;
-
-        save(data);
+        await autoReplies.updateReply(reply.id, {
+          response,
+          responses: [response],
+          randomResponse: false
+        });
 
         return interaction.editReply(
           "تم تعديل الاستجابة بنجاح ✅"
@@ -542,21 +584,22 @@ client.on("interactionCreate", async interaction => {
       // =================================
 
       case "enabled": {
-        const reply = data[guildId][key];
-
         if (!reply) {
           return interaction.editReply(
             "الرد غير موجود."
           );
         }
 
-        reply.enabled = interaction.options
+        const status = interaction.options
           .getBoolean("status");
 
-        save(data);
+        await autoReplies.setReplyEnabled(
+          reply.id,
+          status
+        );
 
         return interaction.editReply(
-          reply.enabled
+          status
             ? "تم تفعيل الرد 🟢"
             : "تم تعطيل الرد 🔴"
         );
@@ -590,80 +633,15 @@ client.on("interactionCreate", async interaction => {
 });
 
 // =====================================
-// AUTO REPLY SYSTEM
-// =====================================
-
-const processedMessages = new Set();
-
-client.on("messageCreate", async message => {
-  try {
-    if (
-      !message.guild ||
-      message.author.bot ||
-      message.webhookId
-    ) {
-      return;
-    }
-
-    if (!message.content || !message.content.trim()) {
-      return;
-    }
-
-    // Prevent duplicate processing
-
-    if (processedMessages.has(message.id)) return;
-
-    processedMessages.add(message.id);
-
-    setTimeout(() => {
-      processedMessages.delete(message.id);
-    }, 30000);
-
-    const replies = getGuildReplies(message.guild.id);
-
-    if (!replies.length) return;
-
-    const content = message.content.toLowerCase();
-
-    // Longest triggers first
-
-    const sortedReplies = replies
-      .filter(reply => reply.enabled !== false)
-      .sort((a, b) =>
-        b.trigger.length - a.trigger.length
-      );
-
-    const match = sortedReplies.find(reply =>
-      content.includes(
-        normalizeTrigger(reply.trigger)
-      )
-    );
-
-    if (!match) return;
-
-    await message.reply({
-      content: match.response,
-      allowedMentions: {
-        parse: []
-      }
-    });
-
-    console.log(
-      `[HERVIN AUTO REPLY] ${message.guild.name}: ${match.trigger}`
-    );
-
-  } catch (error) {
-    safeError("Auto reply handler", error);
-  }
-});
-
-// =====================================
 // START BOT
 // =====================================
 
 async function start() {
   try {
     console.log("[HERVIN] Starting...");
+
+    // Migrate old automatic replies
+    await migrateLegacyReplies();
 
     // Register commands
 
