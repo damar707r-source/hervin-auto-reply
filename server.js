@@ -1,9 +1,321 @@
 
 const express = require("express");
+const crypto = require("crypto");
+
 const app = express();
 
-// تشغيل بوت HERVIN مع لوحة التحكم
+app.use(express.json());
+
+// تشغيل بوت HERVIN
 require("./index");
+
+// =====================================
+// HERVIN DISCORD OAUTH SYSTEM
+// =====================================
+
+const CLIENT_ID = process.env.CLIENT_ID;
+const CLIENT_SECRET = process.env.CLIENT_SECRET;
+const SESSION_SECRET = process.env.SESSION_SECRET;
+
+const REDIRECT_URI =
+  "https://hervin-dashboard.onrender.com/auth/discord/callback";
+
+const sessions = new Map();
+const loginStates = new Map();
+
+const SESSION_MAX_AGE = 24 * 60 * 60 * 1000;
+
+function createSignature(value) {
+  return crypto
+    .createHmac("sha256", SESSION_SECRET)
+    .update(value)
+    .digest("hex");
+}
+
+function getSession(req) {
+  const cookies = req.headers.cookie || "";
+  const match = cookies.match(/(?:^|;\s*)hervin_session=([^;]+)/);
+
+  if (!match) return null;
+
+  const parts = match[1].split(".");
+
+  if (parts.length !== 2) return null;
+
+  const [sessionId, signature] = parts;
+
+  let expected;
+
+  try {
+    expected = createSignature(sessionId);
+
+    const receivedBuffer = Buffer.from(signature, "hex");
+    const expectedBuffer = Buffer.from(expected, "hex");
+
+    if (
+      receivedBuffer.length !== expectedBuffer.length ||
+      !crypto.timingSafeEqual(receivedBuffer, expectedBuffer)
+    ) {
+      return null;
+    }
+  } catch {
+    return null;
+  }
+
+  const session = sessions.get(sessionId);
+
+  if (!session) return null;
+
+  if (Date.now() - session.createdAt > SESSION_MAX_AGE) {
+    sessions.delete(sessionId);
+    return null;
+  }
+
+  return session;
+}
+
+function requireSession(req, res, next) {
+  const session = getSession(req);
+
+  if (!session) {
+    return res.status(401).json({
+      error: "يجب تسجيل الدخول أولاً"
+    });
+  }
+
+  req.hervinSession = session;
+  next();
+}
+
+// =====================================
+// DISCORD LOGIN
+// =====================================
+
+app.get("/auth/discord", (req, res) => {
+  if (!CLIENT_ID || !CLIENT_SECRET || !SESSION_SECRET) {
+    return res.status(500).send(
+      "إعدادات تسجيل الدخول غير مكتملة في Render"
+    );
+  }
+
+  const state = crypto.randomBytes(32).toString("hex");
+
+  loginStates.set(state, Date.now());
+
+  const params = new URLSearchParams({
+    client_id: CLIENT_ID,
+    redirect_uri: REDIRECT_URI,
+    response_type: "code",
+    scope: "identify guilds",
+    state
+  });
+
+  res.redirect(
+    "https://discord.com/oauth2/authorize?" + params.toString()
+  );
+});
+
+// =====================================
+// DISCORD CALLBACK
+// =====================================
+
+app.get("/auth/discord/callback", async (req, res) => {
+  try {
+    const { code, state, error } = req.query;
+
+    if (error) {
+      return res.status(400).send(
+        "تم إلغاء تسجيل الدخول عبر Discord"
+      );
+    }
+
+    if (!code || !state || !loginStates.has(state)) {
+      return res.status(400).send(
+        "طلب تسجيل الدخول غير صالح"
+      );
+    }
+
+    const stateTime = loginStates.get(state);
+    loginStates.delete(state);
+
+    if (Date.now() - stateTime > 5 * 60 * 1000) {
+      return res.status(400).send(
+        "انتهت صلاحية تسجيل الدخول، حاول مرة أخرى"
+      );
+    }
+
+    const tokenResponse = await fetch(
+      "https://discord.com/api/oauth2/token",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded"
+        },
+        body: new URLSearchParams({
+          client_id: CLIENT_ID,
+          client_secret: CLIENT_SECRET,
+          grant_type: "authorization_code",
+          code,
+          redirect_uri: REDIRECT_URI
+        })
+      }
+    );
+
+    const tokenData = await tokenResponse.json();
+
+    if (!tokenResponse.ok || !tokenData.access_token) {
+      console.error("Discord token error:", tokenData);
+
+      return res.status(400).send(
+        "تعذر إكمال تسجيل الدخول"
+      );
+    }
+
+    const headers = {
+      Authorization: `Bearer ${tokenData.access_token}`
+    };
+
+    const [userResponse, guildsResponse] = await Promise.all([
+      fetch("https://discord.com/api/users/@me", { headers }),
+      fetch("https://discord.com/api/users/@me/guilds", { headers })
+    ]);
+
+    if (!userResponse.ok || !guildsResponse.ok) {
+      return res.status(400).send(
+        "تعذر جلب بيانات حساب Discord"
+      );
+    }
+
+    const user = await userResponse.json();
+    const allGuilds = await guildsResponse.json();
+
+    // السيرفرات التي المستخدم مالكها فقط
+    const ownedGuilds = allGuilds.filter(
+      guild => guild.owner === true
+    );
+
+    const sessionId = crypto.randomBytes(32).toString("hex");
+    const signature = createSignature(sessionId);
+
+    sessions.set(sessionId, {
+      createdAt: Date.now(),
+
+      user: {
+        id: user.id,
+        username: user.username,
+        avatar: user.avatar
+      },
+
+      guilds: ownedGuilds,
+      selectedGuild: null
+    });
+
+    res.setHeader(
+      "Set-Cookie",
+      `hervin_session=${sessionId}.${signature}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=86400`
+    );
+
+    res.redirect("/");
+  } catch (error) {
+    console.error("HERVIN OAuth error:", error);
+
+    res.status(500).send(
+      "حدث خطأ أثناء تسجيل الدخول"
+    );
+  }
+});
+
+// =====================================
+// GET USER INFORMATION
+// =====================================
+
+app.get("/api/me", requireSession, (req, res) => {
+  const session = req.hervinSession;
+
+  res.json({
+    loggedIn: true,
+
+    user: session.user,
+
+    selectedGuild: session.selectedGuild
+  });
+});
+
+// =====================================
+// GET OWNED SERVERS
+// =====================================
+
+app.get("/api/guilds", requireSession, (req, res) => {
+  const session = req.hervinSession;
+
+  res.json(
+    session.guilds.map(guild => ({
+      id: guild.id,
+      name: guild.name,
+      icon: guild.icon
+    }))
+  );
+});
+
+// =====================================
+// SELECT SERVER
+// =====================================
+
+app.post("/api/select-server", requireSession, (req, res) => {
+  const session = req.hervinSession;
+  const { guildId } = req.body;
+
+  if (!guildId || typeof guildId !== "string") {
+    return res.status(400).json({
+      error: "معرّف السيرفر غير صالح"
+    });
+  }
+
+  const guild = session.guilds.find(
+    item => item.id === guildId && item.owner === true
+  );
+
+  if (!guild) {
+    return res.status(403).json({
+      error: "غير مسموح لك بالتحكم في هذا السيرفر"
+    });
+  }
+
+  session.selectedGuild = {
+    id: guild.id,
+    name: guild.name
+  };
+
+  res.json({
+    success: true,
+    selectedGuild: session.selectedGuild
+  });
+});
+
+// =====================================
+// LOGOUT
+// =====================================
+
+app.post("/auth/logout", (req, res) => {
+  const cookies = req.headers.cookie || "";
+  const match = cookies.match(/(?:^|;\s*)hervin_session=([^;]+)/);
+
+  if (match) {
+    const sessionId = match[1].split(".")[0];
+    sessions.delete(sessionId);
+  }
+
+  res.setHeader(
+    "Set-Cookie",
+    "hervin_session=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0"
+  );
+
+  res.json({ success: true });
+});
+
+// =====================================
+// HERVIN DASHBOARD
+// =====================================
 
 app.get("/", (req, res) => {
 res.send(`<!DOCTYPE html>
@@ -319,6 +631,87 @@ padding:25px;
 color:#77798c;
 }
 
+/* LOGIN AND SERVER SELECTOR */
+
+#loginPanel{
+max-width:600px;
+margin:60px auto;
+padding:35px;
+background:var(--card);
+border:1px solid var(--border);
+border-radius:23px;
+text-align:center;
+}
+
+#loginPanel h1{
+color:var(--gold);
+font-size:30px;
+}
+
+#loginPanel p{
+color:var(--muted);
+line-height:1.8;
+}
+
+.discord-login{
+display:block;
+width:100%;
+padding:18px;
+margin-top:25px;
+background:#5865F2;
+color:white;
+border:0;
+border-radius:12px;
+font-size:18px;
+font-weight:bold;
+text-decoration:none;
+cursor:pointer;
+}
+
+#dashboardContent{
+display:none;
+}
+
+#serverArea{
+background:var(--card);
+border:1px solid var(--border);
+border-radius:17px;
+padding:20px;
+margin-bottom:25px;
+}
+
+#serverArea label{
+display:block;
+margin-bottom:12px;
+color:var(--gold);
+}
+
+#serverSelect{
+width:100%;
+}
+
+#userArea{
+display:flex;
+align-items:center;
+gap:10px;
+color:var(--gold);
+font-size:14px;
+}
+
+#logoutBtn{
+background:#2b1723;
+color:#ff9a9a;
+border:1px solid #57303d;
+padding:10px 15px;
+border-radius:10px;
+cursor:pointer;
+}
+
+#loginMessage{
+color:#e8c76c;
+margin-top:15px;
+}
+
 @media(max-width:650px){
 .header{height:60px;padding:0 9px}
 .logo{font-size:17px}
@@ -390,6 +783,18 @@ font-size:12px;
 .role-box{padding:8px}
 
 footer{padding:15px;font-size:10px}
+
+#loginPanel{
+margin:25px 8px;
+padding:20px;
+}
+
+#loginPanel h1{font-size:22px}
+#loginPanel p{font-size:13px}
+.discord-login{font-size:14px;padding:13px}
+
+#userArea{font-size:10px}
+#logoutBtn{font-size:11px;padding:7px}
 }
 </style>
 </head>
@@ -405,6 +810,11 @@ footer{padding:15px;font-size:10px}
 <div class="logo">𝐇𝐄𝐑𝐕𝐈𝐍</div>
 
 <div class="header-right">
+<div id="userArea" style="display:none">
+<span id="usernameDisplay"></span>
+<button id="logoutBtn" onclick="logout()">خروج</button>
+</div>
+
 <button class="icon-btn" onclick="toggleMenu()">☰</button>
 </div>
 
@@ -423,7 +833,19 @@ footer{padding:15px;font-size:10px}
 
 </header>
 
-<main id="home">
+<div id="loginPanel">
+<h1>𝐇𝐄𝐑𝐕𝐈𝐍</h1>
+<p>مرحباً بك في لوحة تحكم HERVIN</p>
+<p>سجّل دخولك باستخدام Discord لإدارة السيرفرات التي تملكها</p>
+
+<a class="discord-login" href="/auth/discord">
+تسجيل الدخول باستخدام Discord
+</a>
+
+<p id="loginMessage"></p>
+</div>
+
+<main id="dashboardContent">
 
 <div class="page-title">
 <div>
@@ -431,6 +853,18 @@ footer{padding:15px;font-size:10px}
 <p>إدارة إعدادات البوت والسيرفر</p>
 </div>
 <div class="status">● الواجهة تعمل</div>
+</div>
+
+<div id="serverArea">
+<label>السيرفر الذي تريد إدارته</label>
+
+<select id="serverSelect">
+<option value="">جاري تحميل السيرفرات...</option>
+</select>
+
+<p class="hint" id="serverMessage">
+اختر سيرفراً تملكه حتى تتمكن من إدارته
+</p>
 </div>
 
 <div class="stats">
@@ -625,11 +1059,141 @@ link.addEventListener("click",()=>{
 document.getElementById("menu").classList.remove("show");
 });
 });
+
+async function loadDashboard(){
+  const loginPanel = document.getElementById("loginPanel");
+  const dashboard = document.getElementById("dashboardContent");
+  const userArea = document.getElementById("userArea");
+
+  try {
+    const response = await fetch("/api/me");
+
+    if (!response.ok) {
+      loginPanel.style.display = "block";
+      dashboard.style.display = "none";
+      return;
+    }
+
+    const data = await response.json();
+
+    loginPanel.style.display = "none";
+    dashboard.style.display = "block";
+    userArea.style.display = "flex";
+
+    document.getElementById("usernameDisplay").textContent =
+      data.user.username;
+
+    await loadGuilds(data.selectedGuild?.id);
+  } catch (error) {
+    document.getElementById("loginMessage").textContent =
+      "تعذر الاتصال بالخادم، حاول تحديث الصفحة";
+  }
+}
+
+async function loadGuilds(selectedId){
+  const select = document.getElementById("serverSelect");
+  const message = document.getElementById("serverMessage");
+
+  try {
+    const response = await fetch("/api/guilds");
+
+    if (!response.ok) {
+      message.textContent = "تعذر تحميل السيرفرات";
+      return;
+    }
+
+    const guilds = await response.json();
+
+    select.innerHTML = "";
+
+    if (!guilds.length) {
+      select.innerHTML =
+        '<option value="">لا تملك أي سيرفرات</option>';
+
+      message.textContent =
+        "يجب أن تكون مالك السيرفر حتى يظهر هنا";
+
+      return;
+    }
+
+    select.innerHTML =
+      '<option value="">اختر السيرفر</option>';
+
+    guilds.forEach(guild => {
+      const option = document.createElement("option");
+
+      option.value = guild.id;
+      option.textContent = guild.name;
+
+      select.appendChild(option);
+    });
+
+    if (selectedId) {
+      select.value = selectedId;
+    }
+
+  } catch (error) {
+    message.textContent = "حدث خطأ أثناء تحميل السيرفرات";
+  }
+}
+
+document.getElementById("serverSelect").addEventListener(
+  "change",
+  async function(){
+    const guildId = this.value;
+    const message = document.getElementById("serverMessage");
+
+    if (!guildId) return;
+
+    message.textContent = "جاري التحقق من ملكية السيرفر...";
+
+    try {
+      const response = await fetch("/api/select-server", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ guildId })
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        message.textContent = data.error || "تعذر اختيار السيرفر";
+        return;
+      }
+
+      message.textContent =
+        "تم اختيار السيرفر: " + data.selectedGuild.name;
+
+    } catch (error) {
+      message.textContent = "حدث خطأ أثناء اختيار السيرفر";
+    }
+  }
+);
+
+async function logout(){
+  try {
+    await fetch("/auth/logout", {
+      method: "POST"
+    });
+
+    window.location.reload();
+  } catch (error) {
+    alert("تعذر تسجيل الخروج");
+  }
+}
+
+loadDashboard();
 </script>
 
 </body>
 </html>`);
 });
+
+// =====================================
+// START SERVER
+// =====================================
 
 app.listen(process.env.PORT || 3000, "0.0.0.0", () => {
   console.log("HERVIN Dashboard is running");
