@@ -17,11 +17,18 @@ require("./index");
 const CLIENT_ID = process.env.CLIENT_ID;
 const CLIENT_SECRET = process.env.CLIENT_SECRET;
 const SESSION_SECRET = process.env.SESSION_SECRET;
+const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 
 const REDIRECT_URI =
   "https://hervin-dashboard.onrender.com/auth/discord/callback";
 
 const repliesFile = path.join(__dirname, "replies.json");
+
+const welcomeConfigFile = path.join(
+  __dirname,
+  "systems",
+  "welcome.json"
+);
 
 const sessions = new Map();
 const loginStates = new Map();
@@ -32,12 +39,12 @@ const SESSION_MAX_AGE = 24 * 60 * 60 * 1000;
 // STORAGE
 // =====================================
 
-function loadReplies() {
+function readJson(file) {
   try {
-    if (!fs.existsSync(repliesFile)) return {};
+    if (!fs.existsSync(file)) return {};
 
     const data = JSON.parse(
-      fs.readFileSync(repliesFile, "utf8")
+      fs.readFileSync(file, "utf8")
     );
 
     return data &&
@@ -46,17 +53,37 @@ function loadReplies() {
       ? data
       : {};
   } catch (error) {
-    console.error("Replies load error:", error);
+    console.error("JSON read error:", error);
     return {};
   }
 }
 
-function saveReplies(data) {
+function writeJson(file, data) {
+  fs.mkdirSync(path.dirname(file), {
+    recursive: true
+  });
+
   fs.writeFileSync(
-    repliesFile,
+    file,
     JSON.stringify(data, null, 2),
     "utf8"
   );
+}
+
+function loadReplies() {
+  return readJson(repliesFile);
+}
+
+function saveReplies(data) {
+  writeJson(repliesFile, data);
+}
+
+function loadWelcomeConfig() {
+  return readJson(welcomeConfigFile);
+}
+
+function saveWelcomeConfig(data) {
+  writeJson(welcomeConfigFile, data);
 }
 
 // =====================================
@@ -64,11 +91,14 @@ function saveReplies(data) {
 // =====================================
 
 console.log("=================================");
+
 console.log("HERVIN OAUTH ENV CHECK:", {
   CLIENT_ID: Boolean(CLIENT_ID),
   CLIENT_SECRET: Boolean(CLIENT_SECRET),
-  SESSION_SECRET: Boolean(SESSION_SECRET)
+  SESSION_SECRET: Boolean(SESSION_SECRET),
+  DISCORD_TOKEN: Boolean(DISCORD_TOKEN)
 });
+
 console.log("=================================");
 
 // =====================================
@@ -76,6 +106,10 @@ console.log("=================================");
 // =====================================
 
 function createSignature(value) {
+  if (!SESSION_SECRET) {
+    throw new Error("SESSION_SECRET is missing");
+  }
+
   return crypto
     .createHmac("sha256", SESSION_SECRET)
     .update(value)
@@ -168,6 +202,55 @@ function getSelectedGuild(req) {
   ) || null;
 }
 
+function validDiscordId(id) {
+  return typeof id === "string" &&
+    /^\d{17,20}$/.test(id);
+}
+
+// =====================================
+// DISCORD GUILD DATA
+// =====================================
+
+async function discordGuildData(guildId) {
+  if (!DISCORD_TOKEN) {
+    throw new Error(
+      "إعدادات البوت غير مكتملة في Render"
+    );
+  }
+
+  const headers = {
+    Authorization: `Bot ${DISCORD_TOKEN}`
+  };
+
+  const [rolesResponse, channelsResponse] =
+    await Promise.all([
+      fetch(
+        `https://discord.com/api/v10/guilds/${guildId}/roles`,
+        { headers }
+      ),
+      fetch(
+        `https://discord.com/api/v10/guilds/${guildId}/channels`,
+        { headers }
+      )
+    ]);
+
+  if (!rolesResponse.ok || !channelsResponse.ok) {
+    throw new Error(
+      "تعذر جلب بيانات السيرفر، تأكد أن البوت موجود فيه"
+    );
+  }
+
+  const [roles, channels] = await Promise.all([
+    rolesResponse.json(),
+    channelsResponse.json()
+  ]);
+
+  return {
+    roles,
+    channels
+  };
+}
+
 // =====================================
 // DISCORD LOGIN
 // =====================================
@@ -230,9 +313,11 @@ app.get("/auth/discord/callback", async (req, res) => {
       "https://discord.com/api/oauth2/token",
       {
         method: "POST",
+
         headers: {
           "Content-Type": "application/x-www-form-urlencoded"
         },
+
         body: new URLSearchParams({
           client_id: CLIENT_ID,
           client_secret: CLIENT_SECRET,
@@ -257,10 +342,18 @@ app.get("/auth/discord/callback", async (req, res) => {
       Authorization: `Bearer ${tokenData.access_token}`
     };
 
-    const [userResponse, guildsResponse] = await Promise.all([
-      fetch("https://discord.com/api/users/@me", { headers }),
-      fetch("https://discord.com/api/users/@me/guilds", { headers })
-    ]);
+    const [userResponse, guildsResponse] =
+      await Promise.all([
+        fetch(
+          "https://discord.com/api/users/@me",
+          { headers }
+        ),
+
+        fetch(
+          "https://discord.com/api/users/@me/guilds",
+          { headers }
+        )
+      ]);
 
     if (!userResponse.ok || !guildsResponse.ok) {
       return res.status(400).send(
@@ -295,6 +388,7 @@ app.get("/auth/discord/callback", async (req, res) => {
     );
 
     res.redirect("/");
+
   } catch (error) {
     console.error("HERVIN OAuth error:", error);
 
@@ -340,16 +434,17 @@ app.get("/api/guilds", requireSession, (req, res) => {
 
 app.post("/api/select-server", requireSession, (req, res) => {
   const session = req.hervinSession;
-  const { guildId } = req.body;
+  const { guildId } = req.body || {};
 
-  if (!guildId || typeof guildId !== "string") {
+  if (!validDiscordId(guildId)) {
     return res.status(400).json({
       error: "معرّف السيرفر غير صالح"
     });
   }
 
   const guild = session.guilds.find(item =>
-    item.id === guildId && canManageGuild(item)
+    item.id === guildId &&
+    canManageGuild(item)
   );
 
   if (!guild) {
@@ -368,6 +463,7 @@ app.post("/api/select-server", requireSession, (req, res) => {
     selectedGuild: session.selectedGuild
   });
 });
+
 // =====================================
 // HERVIN AUTO REPLIES API
 // =====================================
@@ -411,14 +507,7 @@ app.post("/api/replies", requireSession, (req, res) => {
     enabled
   } = req.body || {};
 
-  const allowedActions = [
-    "add",
-    "edit",
-    "delete",
-    "toggle"
-  ];
-
-  if (!allowedActions.includes(action)) {
+  if (!["add", "edit", "delete", "toggle"].includes(action)) {
     return res.status(400).json({
       error: "العملية المطلوبة غير صحيحة"
     });
@@ -440,20 +529,12 @@ app.post("/api/replies", requireSession, (req, res) => {
   ];
 
   if (
-    ["add", "edit", "delete", "toggle"].includes(action) &&
-    !cleanTrigger
-  ) {
-    return res.status(400).json({
-      error: "اكتب كلمة التفعيل"
-    });
-  }
-
-  if (
+    !cleanTrigger ||
     cleanTrigger.length > 80 ||
     cleanOldTrigger.length > 80
   ) {
     return res.status(400).json({
-      error: "كلمة التفعيل طويلة جدًا"
+      error: "تحقق من كلمة التفعيل"
     });
   }
 
@@ -488,7 +569,7 @@ app.post("/api/replies", requireSession, (req, res) => {
 
       if (response.length > 1900) {
         return res.status(400).json({
-          error: "الرد طويل جدًا، الحد الأقصى 1900 حرف"
+          error: "الرد طويل جدًا"
         });
       }
 
@@ -509,28 +590,23 @@ app.post("/api/replies", requireSession, (req, res) => {
     if (action === "edit") {
       if (!cleanOldTrigger || !guildReplies[oldKey]) {
         return res.status(404).json({
-          error: "الرد المطلوب تعديله غير موجود"
+          error: "الرد المطلوب غير موجود"
         });
       }
 
       if (
         typeof response !== "string" ||
-        !response.trim()
+        !response.trim() ||
+        response.length > 1900
       ) {
         return res.status(400).json({
-          error: "اكتب نص الرد"
-        });
-      }
-
-      if (response.length > 1900) {
-        return res.status(400).json({
-          error: "الرد طويل جدًا"
+          error: "تحقق من نص الرد"
         });
       }
 
       if (key !== oldKey && guildReplies[key]) {
         return res.status(409).json({
-          error: "كلمة التفعيل الجديدة مستخدمة مسبقًا"
+          error: "كلمة التفعيل الجديدة مستخدمة"
         });
       }
 
@@ -580,6 +656,7 @@ app.post("/api/replies", requireSession, (req, res) => {
       message: "تم تنفيذ العملية بنجاح",
       replies: Object.values(guildReplies)
     });
+
   } catch (error) {
     console.error("HERVIN Replies API Error:", error);
 
@@ -588,50 +665,9 @@ app.post("/api/replies", requireSession, (req, res) => {
     });
   }
 });
+
 // =====================================
 // HERVIN WELCOME SETTINGS API
-// =====================================
-
-const welcomeConfigFile = path.join(
-  __dirname,
-  "systems",
-  "welcome.json"
-);
-
-function loadWelcomeConfig() {
-  try {
-    if (!fs.existsSync(welcomeConfigFile)) return {};
-
-    const data = JSON.parse(
-      fs.readFileSync(welcomeConfigFile, "utf8")
-    );
-
-    return data &&
-      typeof data === "object" &&
-      !Array.isArray(data)
-      ? data
-      : {};
-  } catch (error) {
-    console.error("HERVIN Welcome Config Error:", error);
-    return {};
-  }
-}
-
-function saveWelcomeConfig(data) {
-  fs.writeFileSync(
-    welcomeConfigFile,
-    JSON.stringify(data, null, 2),
-    "utf8"
-  );
-}
-
-function validDiscordId(id) {
-  return typeof id === "string" &&
-    /^\d{17,20}$/.test(id);
-}
-
-// =====================================
-// GET SERVER ROLES AND CHANNELS
 // =====================================
 
 app.get(
@@ -642,43 +678,13 @@ app.get(
 
     if (!guild) {
       return res.status(403).json({
-        error: "اختر سيرفرًا تملك صلاحية إدارته"
-      });
-    }
-
-    if (!process.env.DISCORD_TOKEN) {
-      return res.status(500).json({
-        error: "إعدادات البوت غير مكتملة"
+        error: "اختر سيرفرًا أولاً"
       });
     }
 
     try {
-      const headers = {
-        Authorization: `Bot ${process.env.DISCORD_TOKEN}`
-      };
-
-      const [rolesResponse, channelsResponse] =
-        await Promise.all([
-          fetch(
-            `https://discord.com/api/v10/guilds/${guild.id}/roles`,
-            { headers }
-          ),
-          fetch(
-            `https://discord.com/api/v10/guilds/${guild.id}/channels`,
-            { headers }
-          )
-        ]);
-
-      if (!rolesResponse.ok || !channelsResponse.ok) {
-        return res.status(400).json({
-          error: "تعذر جلب الرتب والقنوات، تأكد أن البوت موجود في السيرفر"
-        });
-      }
-
-      const [roles, channels] = await Promise.all([
-        rolesResponse.json(),
-        channelsResponse.json()
-      ]);
+      const { roles, channels } =
+        await discordGuildData(guild.id);
 
       res.json({
         success: true,
@@ -706,10 +712,10 @@ app.get(
       });
 
     } catch (error) {
-      console.error("HERVIN Welcome Options Error:", error);
+      console.error("Welcome options error:", error);
 
-      res.status(500).json({
-        error: "حدث خطأ أثناء تحميل إعدادات السيرفر"
+      res.status(400).json({
+        error: error.message
       });
     }
   }
@@ -731,8 +737,7 @@ app.get(
       });
     }
 
-    const data = loadWelcomeConfig();
-    const config = data[guild.id] || {};
+    const config = loadWelcomeConfig()[guild.id] || {};
 
     res.json({
       success: true,
@@ -827,51 +832,20 @@ app.post(
         });
       }
 
-      if (
-        body.welcomeChannelId &&
-        !welcomeMessage
-      ) {
+      if (body.welcomeChannelId && !welcomeMessage) {
         return res.status(400).json({
           error: "اكتب رسالة الترحيب"
         });
       }
 
-      if (
-        body.leaveChannelId &&
-        !leaveMessage
-      ) {
+      if (body.leaveChannelId && !leaveMessage) {
         return res.status(400).json({
           error: "اكتب رسالة المغادرة"
         });
       }
 
-      // التحقق من أن الرتب والقنوات تابعة للسيرفر المحدد
-      const headers = {
-        Authorization: `Bot ${process.env.DISCORD_TOKEN}`
-      };
-
-      const [rolesResponse, channelsResponse] =
-        await Promise.all([
-          fetch(
-            `https://discord.com/api/v10/guilds/${guild.id}/roles`,
-            { headers }
-          ),
-          fetch(
-            `https://discord.com/api/v10/guilds/${guild.id}/channels`,
-            { headers }
-          )
-        ]);
-
-      if (!rolesResponse.ok || !channelsResponse.ok) {
-        return res.status(400).json({
-          error: "تعذر التحقق من رتب وقنوات السيرفر"
-        });
-      }
-
-      const [roles, channels] = await Promise.all([
-        rolesResponse.json(),
-        channelsResponse.json()
-      ]);
+      const { roles, channels } =
+        await discordGuildData(guild.id);
 
       const roleIds = new Set(
         roles
@@ -882,7 +856,7 @@ app.post(
           .map(role => role.id)
       );
 
-      const textChannelIds = new Set(
+      const channelIds = new Set(
         channels
           .filter(channel =>
             channel.type === 0 ||
@@ -910,7 +884,7 @@ app.post(
       ]) {
         if (
           body[field] &&
-          !textChannelIds.has(body[field])
+          !channelIds.has(body[field])
         ) {
           return res.status(400).json({
             error: "القناة المحددة غير موجودة في السيرفر"
@@ -919,12 +893,7 @@ app.post(
       }
 
       const data = loadWelcomeConfig();
-
-      if (!data[guild.id]) {
-        data[guild.id] = {};
-      }
-
-      const config = data[guild.id];
+      const config = data[guild.id] || {};
 
       config.memberRoleId = body.memberRoleId || "";
       config.botRoleId = body.botRoleId || "";
@@ -947,1142 +916,1617 @@ app.post(
           "غادرنا {username} من سيرفر {server} 👋"
       };
 
+      data[guild.id] = config;
+
       saveWelcomeConfig(data);
 
       res.json({
         success: true,
-        message: "تم حفظ إعدادات الترحيب والرتب واللوقات بنجاح"
+        message: "تم حفظ إعدادات الترحيب والرتب واللوقات"
       });
 
     } catch (error) {
-      console.error("HERVIN Welcome Save Error:", error);
+      console.error("Welcome settings save error:", error);
 
       res.status(500).json({
-        error: "حدث خطأ أثناء حفظ الإعدادات"
+        error: error.message || "حدث خطأ أثناء حفظ الإعدادات"
       });
     }
   }
 );
+
 // =====================================
-// HERVIN DASHBOARD
+// HERVIN DASHBOARD PAGE
 // =====================================
 
 app.get("/", (req, res) => {
   res.send(`<!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>HERVIN Dashboard</title>
-
-<style>
-* {
-  margin: 0;
-  padding: 0;
-  box-sizing: border-box;
-}
-
-:root {
-  --bg: #09090f;
-  --panel: #12121c;
-  --panel2: #191927;
-  --purple: #8b5cf6;
-  --purple2: #6d3de0;
-  --gold: #d6b56d;
-  --text: #f5f3ff;
-  --muted: #9995aa;
-  --border: rgba(255,255,255,.08);
-  --green: #35c98a;
-  --red: #ef6464;
-}
-
-body {
-  background: var(--bg);
-  color: var(--text);
-  font-family: Arial, sans-serif;
-  min-height: 100vh;
-}
-
-button, input, textarea, select {
-  font-family: inherit;
-}
-
-button {
-  cursor: pointer;
-}
-
-.header {
-  height: 75px;
-  padding: 0 5%;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  background: rgba(18,18,28,.95);
-  border-bottom: 1px solid var(--border);
-  position: sticky;
-  top: 0;
-  z-index: 20;
-}
-
-.logo {
-  font-size: 25px;
-  font-weight: 900;
-  letter-spacing: 4px;
-  color: var(--gold);
-}
-
-.header-actions {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.main {
-  width: 92%;
-  max-width: 1250px;
-  margin: 35px auto;
-}
-
-.welcome-box {
-  background:
-    radial-gradient(circle at 90% 10%, rgba(139,92,246,.25), transparent 35%),
-    linear-gradient(135deg,#171525,#11111b);
-  border: 1px solid var(--border);
-  border-radius: 18px;
-  padding: 35px;
-  margin-bottom: 25px;
-}
-
-.welcome-box h1 {
-  font-size: 30px;
-  margin-bottom: 12px;
-}
-
-.welcome-box p {
-  color: var(--muted);
-  line-height: 1.8;
-}
-
-.panel {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 16px;
-  padding: 24px;
-  margin-bottom: 22px;
-}
-
-.panel h2 {
-  font-size: 20px;
-  margin-bottom: 10px;
-}
-
-.description {
-  color: var(--muted);
-  font-size: 14px;
-  line-height: 1.8;
-  margin-bottom: 20px;
-}
-
-.btn {
-  border: 0;
-  border-radius: 9px;
-  padding: 12px 18px;
-  background: var(--purple);
-  color: white;
-  font-weight: bold;
-  transition: .2s;
-}
-
-.btn:hover {
-  background: var(--purple2);
-}
-
-.btn.gold {
-  background: var(--gold);
-  color: #17120a;
-}
-
-.btn.dark {
-  background: var(--panel2);
-  border: 1px solid var(--border);
-  color: var(--text);
-}
-
-.btn.danger {
-  background: rgba(239,100,100,.15);
-  color: #ff8585;
-  border: 1px solid rgba(239,100,100,.25);
-}
-
-.btn.success {
-  background: rgba(53,201,138,.15);
-  color: #55dfa5;
-  border: 1px solid rgba(53,201,138,.25);
-}
-
-.login-screen {
-  text-align: center;
-  padding: 75px 20px;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 18px;
-}
-
-.login-screen h2 {
-  margin-bottom: 15px;
-}
-
-.login-screen p {
-  color: var(--muted);
-  margin-bottom: 25px;
-  line-height: 1.8;
-}
-
-.dashboard-content {
-  display: none;
-}
-
-.server-area {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 15px;
-  flex-wrap: wrap;
-  margin-bottom: 25px;
-}
-
-.server-area label {
-  color: var(--muted);
-  display: block;
-  margin-bottom: 8px;
-}
-
-select, input, textarea {
-  width: 100%;
-  background: var(--panel2);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  padding: 13px;
-  outline: none;
-}
-
-select:focus, input:focus, textarea:focus {
-  border-color: var(--purple);
-}
-
-.server-select {
-  min-width: 240px;
-}
-
-.dashboard-grid {
-  display: grid;
-  grid-template-columns: repeat(2,minmax(0,1fr));
-  gap: 18px;
-  margin-bottom: 25px;
-}
-
-.stat-card {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  padding: 22px;
-}
-
-.stat-card span {
-  display: block;
-  color: var(--muted);
-  margin-bottom: 12px;
-}
-
-.stat-card strong {
-  color: var(--gold);
-  font-size: 23px;
-}
-
-.section {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 16px;
-  padding: 25px;
-  margin-bottom: 22px;
-}
-
-.section-head {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  margin-bottom: 22px;
-}
-
-.section-icon {
-  width: 45px;
-  height: 45px;
-  border-radius: 12px;
-  background: rgba(139,92,246,.15);
-  color: var(--gold);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 22px;
-}
-
-.section-head h2 {
-  font-size: 19px;
-  margin-bottom: 6px;
-}
-
-.section-head p {
-  font-size: 13px;
-  color: var(--muted);
-}
-
-.reply-form {
-  background: var(--panel2);
-  border: 1px solid var(--border);
-  border-radius: 13px;
-  padding: 18px;
-  margin-bottom: 22px;
-}
-
-.form-group {
-  margin-bottom: 15px;
-}
-
-.form-group label {
-  display: block;
-  margin-bottom: 9px;
-  font-size: 14px;
-  color: #d5d0e5;
-}
-
-textarea {
-  resize: vertical;
-  min-height: 110px;
-  line-height: 1.7;
-}
-
-.reply-message {
-  color: var(--muted);
-  font-size: 14px;
-  margin: 12px 0;
-  line-height: 1.7;
-}
-
-.reply-list {
-  display: flex;
-  flex-direction: column;
-  gap: 13px;
-}
-
-.reply-item {
-  background: var(--panel2);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 17px;
-}
-
-.reply-top {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-  margin-bottom: 12px;
-}
-
-.reply-trigger {
-  color: var(--gold);
-  font-weight: bold;
-  overflow-wrap: anywhere;
-}
-
-.reply-status {
-  font-size: 12px;
-  padding: 6px 10px;
-  border-radius: 20px;
-}
-
-.reply-status.active {
-  color: #55dfa5;
-  background: rgba(53,201,138,.12);
-}
-
-.reply-status.disabled {
-  color: #ff8585;
-  background: rgba(239,100,100,.12);
-}
-
-.reply-response {
-  color: #c4bfd2;
-  font-size: 14px;
-  line-height: 1.8;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  margin-bottom: 15px;
-}
-
-.reply-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.reply-actions .btn {
-  padding: 9px 13px;
-  font-size: 12px;
-}
-
-.empty-state {
-  text-align: center;
-  padding: 25px;
-  color: var(--muted);
-  background: var(--panel2);
-  border-radius: 12px;
-  line-height: 1.8;
-}
-
-.hidden {
-  display: none !important;
-}
-
-.footer {
-  text-align: center;
-  color: var(--muted);
-  padding: 30px 15px;
-  font-size: 12px;
-}
-
-@media(max-width:700px) {
-  .header {
-    padding: 0 4%;
-    height: 65px;
-  }
-
-  .logo {
-    font-size: 21px;
-  }
-
-  .main {
-    width: 94%;
-    margin-top: 20px;
-  }
-
-  .welcome-box {
-    padding: 23px;
-  }
-
-  .welcome-box h1 {
-    font-size: 24px;
-  }
-
-  .panel, .section {
-    padding: 17px;
-  }
-
-  .dashboard-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .server-area {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .server-select {
-    min-width: 0;
-  }
-
-  .reply-actions .btn {
-    flex: 1;
-  }
-}
-</style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>HERVIN Dashboard</title>
+
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background: #0b0d13;
+      color: #f4f4f5;
+      font-family: Arial, sans-serif;
+      min-height: 100vh;
+    }
+
+    button, input, textarea, select {
+      font: inherit;
+    }
+
+    button {
+      cursor: pointer;
+      border: none;
+    }
+
+    .hidden {
+      display: none !important;
+    }
+
+    .login-screen {
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+
+    .login-card {
+      width: 100%;
+      max-width: 430px;
+      background: #141722;
+      border: 1px solid #252a39;
+      border-radius: 22px;
+      padding: 35px;
+      text-align: center;
+    }
+
+    .logo {
+      font-size: 42px;
+      font-weight: 900;
+      letter-spacing: 5px;
+      color: #9b8cff;
+      margin-bottom: 15px;
+    }
+
+    .login-card h1 {
+      font-size: 25px;
+      margin-bottom: 12px;
+    }
+
+    .login-card p {
+      color: #9298aa;
+      line-height: 1.8;
+      margin-bottom: 25px;
+    }
+
+    .primary-btn {
+      background: #7965ed;
+      color: white;
+      padding: 13px 20px;
+      border-radius: 11px;
+      font-weight: bold;
+      transition: .2s;
+    }
+
+    .primary-btn:hover {
+      background: #6752dc;
+      transform: translateY(-1px);
+    }
+
+    .secondary-btn {
+      background: #252a39;
+      color: white;
+      padding: 11px 16px;
+      border-radius: 10px;
+    }
+
+    .danger-btn {
+      background: #9d303d;
+      color: white;
+      padding: 9px 13px;
+      border-radius: 9px;
+    }
+
+    .success-btn {
+      background: #167a57;
+      color: white;
+      padding: 9px 13px;
+      border-radius: 9px;
+    }
+
+    .dashboard {
+      display: flex;
+      min-height: 100vh;
+    }
+
+    .sidebar {
+      width: 255px;
+      background: #11141e;
+      border-left: 1px solid #252a39;
+      padding: 25px 16px;
+      flex-shrink: 0;
+    }
+
+    .sidebar-logo {
+      font-size: 27px;
+      font-weight: 900;
+      color: #9b8cff;
+      text-align: center;
+      letter-spacing: 3px;
+      margin-bottom: 30px;
+    }
+
+    .sidebar-label {
+      color: #72798c;
+      font-size: 12px;
+      margin: 22px 10px 10px;
+    }
+
+    .nav-btn {
+      width: 100%;
+      padding: 13px;
+      border-radius: 10px;
+      background: transparent;
+      color: #aeb3c2;
+      text-align: right;
+      margin-bottom: 5px;
+      transition: .2s;
+    }
+
+    .nav-btn:hover,
+    .nav-btn.active {
+      background: #25213f;
+      color: #b5a8ff;
+    }
+
+    .main {
+      flex: 1;
+      min-width: 0;
+      padding: 28px;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 15px;
+      margin-bottom: 30px;
+      flex-wrap: wrap;
+    }
+
+    .topbar h1 {
+      font-size: 25px;
+    }
+
+    .user-info {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      background: #171b28;
+      border: 1px solid #282e40;
+      border-radius: 12px;
+      padding: 10px 14px;
+    }
+
+    .user-info span {
+      color: #b8bdcb;
+      font-size: 14px;
+    }
+
+    .panel {
+      display: none;
+    }
+
+    .panel.active {
+      display: block;
+    }
+
+    .card {
+      background: #141824;
+      border: 1px solid #272d3d;
+      border-radius: 16px;
+      padding: 22px;
+      margin-bottom: 20px;
+    }
+
+    .card h2 {
+      font-size: 19px;
+      margin-bottom: 9px;
+    }
+
+    .card-description {
+      color: #8e95a8;
+      font-size: 13px;
+      line-height: 1.8;
+      margin-bottom: 20px;
+    }
+
+    .form-group {
+      margin-bottom: 17px;
+    }
+
+    .form-group label {
+      display: block;
+      margin-bottom: 9px;
+      color: #c9ccda;
+      font-size: 14px;
+    }
+
+    .form-control {
+      width: 100%;
+      background: #0d1019;
+      border: 1px solid #30364a;
+      color: white;
+      border-radius: 10px;
+      padding: 12px;
+      outline: none;
+    }
+
+    .form-control:focus {
+      border-color: #8874ff;
+    }
+
+    textarea.form-control {
+      resize: vertical;
+      min-height: 100px;
+      line-height: 1.8;
+    }
+
+    select.form-control {
+      cursor: pointer;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .server-select {
+      max-width: 500px;
+    }
+
+    .server-status {
+      color: #8e95a8;
+      font-size: 13px;
+      margin-top: 12px;
+    }
+
+    .reply-item {
+      background: #0e121c;
+      border: 1px solid #2a3040;
+      border-radius: 12px;
+      padding: 16px;
+      margin-bottom: 12px;
+    }
+
+    .reply-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 12px;
+    }
+
+    .reply-trigger {
+      color: #b6aaff;
+      font-weight: bold;
+      word-break: break-word;
+    }
+
+    .reply-response {
+      color: #aeb4c3;
+      font-size: 14px;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      line-height: 1.8;
+      margin-bottom: 14px;
+    }
+
+    .reply-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .reply-actions button {
+      font-size: 12px;
+    }
+
+    .empty-state {
+      color: #81899c;
+      text-align: center;
+      padding: 25px;
+      border: 1px dashed #30364a;
+      border-radius: 12px;
+    }
+
+    .status-message {
+      padding: 12px;
+      border-radius: 10px;
+      margin-bottom: 15px;
+      font-size: 13px;
+      display: none;
+      line-height: 1.7;
+    }
+
+    .status-message.success {
+      display: block;
+      background: #12372d;
+      color: #76e2b7;
+    }
+
+    .status-message.error {
+      display: block;
+      background: #421d27;
+      color: #ff9ba7;
+    }
+
+    .user-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .hint {
+      color: #858da0;
+      font-size: 12px;
+      line-height: 1.8;
+      margin-top: 8px;
+    }
+
+    .section-title {
+      margin-bottom: 18px;
+    }
+
+    .section-title p {
+      color: #8e95a8;
+      margin-top: 8px;
+      font-size: 13px;
+      line-height: 1.8;
+    }
+
+    @media (max-width: 850px) {
+      .dashboard {
+        display: block;
+      }
+
+      .sidebar {
+        width: 100%;
+        border-left: none;
+        border-bottom: 1px solid #252a39;
+        padding: 15px;
+      }
+
+      .sidebar-logo {
+        margin-bottom: 15px;
+      }
+
+      .sidebar-label {
+        display: none;
+      }
+
+      .sidebar nav {
+        display: flex;
+        overflow-x: auto;
+        gap: 5px;
+      }
+
+      .nav-btn {
+        white-space: nowrap;
+        width: auto;
+        margin: 0;
+      }
+
+      .main {
+        padding: 18px;
+      }
+    }
+
+    @media (max-width: 550px) {
+      .grid {
+        grid-template-columns: 1fr;
+      }
+
+      .topbar h1 {
+        font-size: 20px;
+      }
+
+      .card {
+        padding: 16px;
+      }
+
+      .login-card {
+        padding: 25px 18px;
+      }
+    }
+  </style>
 </head>
 
 <body>
 
-<header class="header">
-  <div class="logo">HERVIN</div>
+  <!-- LOGIN SCREEN -->
 
-  <div class="header-actions">
-    <button class="btn dark" onclick="logout()">
-      تسجيل الخروج
-    </button>
-  </div>
-</header>
+  <section id="loginScreen" class="login-screen">
+    <div class="login-card">
+      <div class="logo">HERVIN</div>
 
-<main class="main">
+      <h1>لوحة تحكم هيرفن</h1>
 
-  <div class="welcome-box">
-    <h1>مرحباً بك في HERVIN</h1>
-    <p>
-      لوحة التحكم الرسمية لإدارة بوت HERVIN
-      والتحكم في أنظمة السيرفر الخاص بك
-    </p>
-  </div>
-
-  <div class="login-screen" id="loginScreen">
-    <h2>تسجيل الدخول إلى HERVIN</h2>
-
-    <p>
-      سجل دخولك باستخدام Discord للوصول إلى لوحة التحكم
-      <br>
-      يجب أن تكون مالك السيرفر أو لديك صلاحية Administrator
-    </p>
-
-    <button class="btn gold" onclick="login()">
-      تسجيل الدخول عبر Discord
-    </button>
-  </div>
-
-  <div class="dashboard-content" id="dashboardContent">
-
-    <div class="server-area">
-      <div>
-        <label>السيرفر المحدد</label>
-
-        <select
-          class="server-select"
-          id="serverSelect"
-          onchange="selectServer()"
-        >
-          <option value="">اختر السيرفر</option>
-        </select>
-      </div>
-
-      <button class="btn dark" onclick="loadGuilds()">
-        تحديث السيرفرات
-      </button>
-    </div>
-
-    <div class="dashboard-grid">
-
-      <div class="stat-card">
-        <span>حالة لوحة التحكم</span>
-        <strong>متصلة</strong>
-      </div>
-
-      <div class="stat-card">
-        <span>النظام</span>
-        <strong>HERVIN BOT</strong>
-      </div>
-
-    </div>
-
-    <section class="section" id="replies">
-
-      <div class="section-head">
-        <div class="section-icon">✉</div>
-
-        <div>
-          <h2>الردود التلقائية</h2>
-          <p>إدارة ردود HERVIN الذكية</p>
-        </div>
-      </div>
-
-      <p class="description">
-        أضف كلمات تفعيل واجعل HERVIN يرد عليها تلقائياً
-        ويمكنك تعديل الردود أو حذفها أو إيقافها
+      <p>
+        أهلاً بك في لوحة تحكم HERVIN
+        <br>
+        سجل دخولك باستخدام Discord لإدارة سيرفرك
       </p>
 
-      <div class="reply-form">
+      <a href="/auth/discord">
+        <button class="primary-btn">
+          تسجيل الدخول عبر Discord
+        </button>
+      </a>
+    </div>
+  </section>
 
-        <div class="form-group">
-          <label for="replyTrigger">
-            كلمة التفعيل
-          </label>
+  <!-- DASHBOARD -->
 
-          <input
-            id="replyTrigger"
-            type="text"
-            maxlength="80"
-            placeholder="مثال: السلام عليكم"
-          >
-        </div>
+  <div id="dashboard" class="dashboard hidden">
 
-        <div class="form-group">
-          <label for="replyResponse">
-            نص الرد
-          </label>
+    <aside class="sidebar">
 
-          <textarea
-            id="replyResponse"
-            maxlength="1900"
-            placeholder="اكتب الرد الذي سيظهر من البوت..."
-          ></textarea>
-        </div>
+      <div class="sidebar-logo">HERVIN</div>
 
-        <div class="reply-actions">
+      <div class="sidebar-label">القائمة الرئيسية</div>
+
+      <nav>
+        <button class="nav-btn active" data-panel="home">
+          الرئيسية
+        </button>
+
+        <button class="nav-btn" data-panel="replies">
+          الردود التلقائية
+        </button>
+
+        <button class="nav-btn" data-panel="welcome">
+          الترحيب والمغادرة
+        </button>
+      </nav>
+
+    </aside>
+
+    <main class="main">
+
+      <header class="topbar">
+
+        <h1 id="pageTitle">الرئيسية</h1>
+
+        <div class="user-actions">
+
+          <div class="user-info">
+            <span id="username">...</span>
+          </div>
+
           <button
-            class="btn gold"
-            id="replySaveButton"
-            onclick="saveReply()"
+            class="danger-btn"
+            id="logoutBtn"
+          >
+            تسجيل الخروج
+          </button>
+
+        </div>
+
+      </header>
+
+      <!-- HOME -->
+
+      <section id="panel-home" class="panel active">
+
+        <div class="section-title">
+          <h2>مرحباً بك في HERVIN</h2>
+
+          <p>
+            تحكم في إعدادات البوت وأنظمة السيرفر من مكان واحد
+          </p>
+        </div>
+
+        <div class="card">
+
+          <h2>اختيار السيرفر</h2>
+
+          <p class="card-description">
+            اختر السيرفر الذي تملك صلاحية إدارته
+            أو لديك فيه صلاحية Administrator
+          </p>
+
+          <div class="form-group server-select">
+
+            <label>السيرفرات المتاحة</label>
+
+            <select
+              id="guildSelect"
+              class="form-control"
+            >
+              <option value="">جاري تحميل السيرفرات...</option>
+            </select>
+
+          </div>
+
+          <p id="serverStatus" class="server-status">
+            لم يتم اختيار سيرفر بعد
+          </p>
+
+        </div>
+
+        <div class="card">
+
+          <h2>أنظمة HERVIN</h2>
+
+          <p class="card-description">
+            يمكنك إدارة الردود التلقائية وإعدادات الترحيب
+            والمغادرة من القائمة الجانبية
+          </p>
+
+        </div>
+
+      </section>
+
+      <!-- AUTO REPLIES -->
+
+      <section id="panel-replies" class="panel">
+
+        <div class="section-title">
+          <h2>الردود التلقائية</h2>
+
+          <p>
+            أضف كلمات تفعيل واجعل HERVIN يرد عليها تلقائياً
+          </p>
+        </div>
+
+        <div id="repliesMessage" class="status-message"></div>
+
+        <div class="card">
+
+          <h2>إضافة رد جديد</h2>
+
+          <p class="card-description">
+            حدد كلمة التفعيل والرد الذي سيرسله البوت
+          </p>
+
+          <div class="form-group">
+
+            <label>كلمة التفعيل</label>
+
+            <input
+              id="replyTrigger"
+              class="form-control"
+              maxlength="80"
+              placeholder="مثال: السلام عليكم"
+            >
+
+          </div>
+
+          <div class="form-group">
+
+            <label>نص الرد</label>
+
+            <textarea
+              id="replyResponse"
+              class="form-control"
+              maxlength="1900"
+              placeholder="اكتب الرد هنا..."
+            ></textarea>
+
+          </div>
+
+          <button
+            class="primary-btn"
+            id="addReplyBtn"
           >
             إضافة الرد
           </button>
 
+        </div>
+
+        <div class="card">
+
+          <h2>الردود الموجودة</h2>
+
+          <p class="card-description">
+            يمكنك تعديل الردود أو حذفها أو إيقافها مؤقتاً
+          </p>
+
+          <div id="repliesList">
+            <div class="empty-state">
+              اختر سيرفراً لعرض الردود
+            </div>
+          </div>
+
+        </div>
+
+      </section>
+
+      <!-- WELCOME SETTINGS -->
+
+      <section id="panel-welcome" class="panel">
+
+        <div class="section-title">
+
+          <h2>إعدادات الترحيب والمغادرة</h2>
+
+          <p>
+            تحكم في رسائل الترحيب والمغادرة والرتب التلقائية
+            وقنوات تسجيل الدخول والخروج
+          </p>
+
+        </div>
+
+        <div id="welcomeMessageStatus" class="status-message"></div>
+
+        <div class="card">
+
+          <h2>الرتب التلقائية</h2>
+
+          <p class="card-description">
+            اختر الرتبة التي يحصل عليها العضو أو البوت عند دخوله
+          </p>
+
+          <div class="grid">
+
+            <div class="form-group">
+
+              <label>رتبة الأعضاء</label>
+
+              <select
+                id="memberRoleId"
+                class="form-control"
+              >
+                <option value="">بدون رتبة تلقائية</option>
+              </select>
+
+            </div>
+
+            <div class="form-group">
+
+              <label>رتبة البوتات</label>
+
+              <select
+                id="botRoleId"
+                class="form-control"
+              >
+                <option value="">بدون رتبة تلقائية</option>
+              </select>
+
+            </div>
+
+          </div>
+
+          <p class="hint">
+            يجب أن تكون رتبة البوت أعلى من الرتب التي تريد منحهـا للأعضاء
+          </p>
+
+        </div>
+
+        <div class="card">
+
+          <h2>رسالة الترحيب</h2>
+
+          <p class="card-description">
+            اختر القناة واكتب الرسالة التي تظهر عند دخول عضو جديد
+          </p>
+
+          <div class="form-group">
+
+            <label>قناة الترحيب</label>
+
+            <select
+              id="welcomeChannelId"
+              class="form-control"
+            >
+              <option value="">تعطيل رسالة الترحيب</option>
+            </select>
+
+          </div>
+
+          <div class="form-group">
+
+            <label>نص الترحيب</label>
+
+            <textarea
+              id="welcomeMessage"
+              class="form-control"
+              maxlength="1000"
+            >أهلًا وسهلًا {user} في سيرفر {server} 🎉
+أنت العضو رقم {memberCount}</textarea>
+
+            <p class="hint">
+              المتغيرات المتاحة:
+              {user} اسم العضو مع المنشن،
+              {username} اسم العضو،
+              {server} اسم السيرفر،
+              {memberCount} عدد الأعضاء
+            </p>
+
+          </div>
+
+        </div>
+
+        <div class="card">
+
+          <h2>رسالة المغادرة</h2>
+
+          <p class="card-description">
+            حدد القناة والرسالة التي تظهر عند خروج عضو
+          </p>
+
+          <div class="form-group">
+
+            <label>قناة المغادرة</label>
+
+            <select
+              id="leaveChannelId"
+              class="form-control"
+            >
+              <option value="">تعطيل رسالة المغادرة</option>
+            </select>
+
+          </div>
+
+          <div class="form-group">
+
+            <label>نص المغادرة</label>
+
+            <textarea
+              id="leaveMessage"
+              class="form-control"
+              maxlength="1000"
+            >غادرنا {username} من سيرفر {server} 👋</textarea>
+
+            <p class="hint">
+              المتغيرات المتاحة:
+              {user}،
+              {username}،
+              {server}،
+              {memberCount}
+            </p>
+
+          </div>
+
+        </div>
+
+        <div class="card">
+
+          <h2>سجلات الدخول والخروج</h2>
+
+          <p class="card-description">
+            اختر القنوات التي تستقبل سجلات دخول الأعضاء وخروجهم
+          </p>
+
+          <div class="grid">
+
+            <div class="form-group">
+
+              <label>قناة سجل الدخول</label>
+
+              <select
+                id="joinLogChannelId"
+                class="form-control"
+              >
+                <option value="">بدون سجل دخول</option>
+              </select>
+
+            </div>
+
+            <div class="form-group">
+
+              <label>قناة سجل الخروج</label>
+
+              <select
+                id="leaveLogChannelId"
+                class="form-control"
+              >
+                <option value="">بدون سجل خروج</option>
+              </select>
+
+            </div>
+
+          </div>
+
+        </div>
+
+        <div class="card">
+
           <button
-            class="btn dark hidden"
-            id="replyCancelButton"
-            onclick="cancelReplyEdit()"
+            class="primary-btn"
+            id="saveWelcomeBtn"
           >
-            إلغاء التعديل
+            حفظ جميع الإعدادات
           </button>
+
         </div>
 
-        <div
-          class="reply-message"
-          id="replyMessage"
-          aria-live="polite"
-        ></div>
+      </section>
 
-      </div>
-
-      <h3 style="margin-bottom:15px">
-        الردود المحفوظة
-      </h3>
-
-      <div id="replyList" class="reply-list">
-
-        <div class="empty-state">
-          اختر سيرفرًا لعرض الردود
-        </div>
-
-      </div>
-
-    </section>
-
-    <section class="section">
-
-      <div class="section-head">
-        <div class="section-icon">⚙</div>
-
-        <div>
-          <h2>إعدادات HERVIN</h2>
-          <p>أقسام لوحة التحكم</p>
-        </div>
-      </div>
-
-      <div class="empty-state">
-        سيتم تفعيل بقية أنظمة لوحة التحكم وربطها
-        تدريجيًا
-      </div>
-
-    </section>
+    </main>
 
   </div>
 
-</main>
-
-<footer class="footer">
-  HERVIN DASHBOARD © 2026
-</footer>
-
-<script>
-
-// =====================================
-// HERVIN DASHBOARD JAVASCRIPT
-// =====================================
-
-let selectedGuildId = null;
-let replies = [];
-let editingTrigger = null;
-
-// =====================================
-// API HELPER
-// =====================================
-
-async function api(url, options = {}) {
-  const response = await fetch(url, {
-    credentials: "same-origin",
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      ...(options.headers || {})
-    }
-  });
-
-  let data = {};
-
-  try {
-    data = await response.json();
-  } catch {
-    data = {};
-  }
-
-  if (!response.ok) {
-    throw new Error(
-      data.error || "حدث خطأ أثناء تنفيذ الطلب"
-    );
-  }
-
-  return data;
-}
-
-// =====================================
-// LOGIN
-// =====================================
-
-function login() {
-  window.location.href = "/auth/discord";
-}
-
-// =====================================
-// DASHBOARD
-// =====================================
-
-async function loadDashboard() {
-  try {
-    const data = await api("/api/me");
-
-    if (!data.loggedIn) {
-      showLogin();
-      return;
-    }
-
-    document.getElementById("loginScreen").style.display = "none";
-
-    document.getElementById("dashboardContent").style.display = "block";
-
-    await loadGuilds();
-
-  } catch (error) {
-    showLogin();
-  }
-}
-
-function showLogin() {
-  document.getElementById("loginScreen").style.display = "block";
-
-  document.getElementById("dashboardContent").style.display = "none";
-}
-
-// =====================================
-// LOAD SERVERS
-// =====================================
-
-async function loadGuilds() {
-  const select = document.getElementById("serverSelect");
-
-  try {
-    const guilds = await api("/api/guilds");
-
-    select.replaceChildren();
-
-    const defaultOption = document.createElement("option");
-
-    defaultOption.value = "";
-    defaultOption.textContent = "اختر السيرفر";
-
-    select.appendChild(defaultOption);
-
-    guilds.forEach(guild => {
-      const option = document.createElement("option");
-
-      option.value = guild.id;
-      option.textContent = guild.name;
-
-      select.appendChild(option);
-    });
-
-    const me = await api("/api/me");
-
-    if (
-      me.selectedGuild &&
-      guilds.some(guild => guild.id === me.selectedGuild.id)
-    ) {
-      selectedGuildId = me.selectedGuild.id;
-      select.value = selectedGuildId;
-
-      await loadReplies();
-
-    } else {
-      selectedGuildId = null;
-      replies = [];
-
-      renderReplies();
-    }
-
-  } catch (error) {
-    showReplyMessage(error.message, true);
-  }
-}
-
-// =====================================
-// SELECT SERVER
-// =====================================
-
-async function selectServer() {
-  const guildId = document.getElementById("serverSelect").value;
-
-  if (!guildId) {
-    selectedGuildId = null;
-    replies = [];
-
-    cancelReplyEdit();
-    renderReplies();
-
-    return;
-  }
-
-  try {
-    await api("/api/select-server", {
-      method: "POST",
-
-      body: JSON.stringify({
-        guildId
-      })
-    });
-
-    selectedGuildId = guildId;
-
-    cancelReplyEdit();
-
-    await loadReplies();
-
-  } catch (error) {
-    showReplyMessage(error.message, true);
-  }
-}
-
-// =====================================
-// LOAD REPLIES
-// =====================================
-
-async function loadReplies() {
-  const list = document.getElementById("replyList");
-
-  if (!selectedGuildId) {
-    replies = [];
-    renderReplies();
-    return;
-  }
-
-  list.textContent = "جاري تحميل الردود...";
-
-  try {
-    const data = await api("/api/replies");
-
-    replies = Array.isArray(data.replies)
-      ? data.replies
-      : [];
-
-    renderReplies();
-
-  } catch (error) {
-    list.textContent = error.message;
-  }
-}
-
-// =====================================
-// RENDER REPLIES
-// =====================================
-
-function renderReplies() {
-  const list = document.getElementById("replyList");
-
-  list.replaceChildren();
-
-  if (!selectedGuildId) {
-    const empty = document.createElement("div");
-
-    empty.className = "empty-state";
-    empty.textContent = "اختر سيرفرًا أولاً لعرض الردود";
-
-    list.appendChild(empty);
-    return;
-  }
-
-  if (!replies.length) {
-    const empty = document.createElement("div");
-
-    empty.className = "empty-state";
-    empty.textContent = "لا توجد ردود محفوظة في هذا السيرفر حتى الآن";
-
-    list.appendChild(empty);
-    return;
-  }
-
-  replies.forEach(reply => {
-    const item = document.createElement("div");
-
-    item.className = "reply-item";
-
-    const top = document.createElement("div");
-
-    top.className = "reply-top";
-
-    const trigger = document.createElement("div");
-
-    trigger.className = "reply-trigger";
-    trigger.textContent = "الكلمة: " + reply.trigger;
-
-    const status = document.createElement("span");
-
-    status.className = "reply-status " +
-      (reply.enabled === false ? "disabled" : "active");
-
-    status.textContent = reply.enabled === false
-      ? "متوقف"
-      : "مفعل";
-
-    top.append(trigger, status);
-
-    const response = document.createElement("div");
-
-    response.className = "reply-response";
-    response.textContent = reply.response;
-
-    const actions = document.createElement("div");
-
-    actions.className = "reply-actions";
-
-    const editButton = document.createElement("button");
-
-    editButton.className = "btn dark";
-    editButton.textContent = "تعديل";
-
-    editButton.addEventListener("click", () => {
-      startReplyEdit(reply);
-    });
-
-    const toggleButton = document.createElement("button");
-
-    toggleButton.className = "btn " +
-      (reply.enabled === false ? "success" : "dark");
-
-    toggleButton.textContent = reply.enabled === false
-      ? "تفعيل"
-      : "إيقاف";
-
-    toggleButton.addEventListener("click", () => {
-      toggleReply(reply);
-    });
-
-    const deleteButton = document.createElement("button");
-
-    deleteButton.className = "btn danger";
-    deleteButton.textContent = "حذف";
-
-    deleteButton.addEventListener("click", () => {
-      deleteReply(reply);
-    });
-
-    actions.append(
-      editButton,
-      toggleButton,
-      deleteButton
-    );
-
-    item.append(
-      top,
-      response,
-      actions
-    );
-
-    list.appendChild(item);
-  });
-}
-
-// =====================================
-// ADD REPLY
-// =====================================
-
-async function saveReply() {
-  const triggerInput = document.getElementById("replyTrigger");
-
-  const responseInput = document.getElementById("replyResponse");
-
-  const trigger = triggerInput.value.trim();
-
-  const response = responseInput.value.trim();
-
-  if (!selectedGuildId) {
-    showReplyMessage("اختر سيرفرًا أولاً", true);
-    return;
-  }
-
-  if (!trigger || !response) {
-    showReplyMessage("اكتب كلمة التفعيل والرد", true);
-    return;
-  }
-
-  const button = document.getElementById("replySaveButton");
-
-  button.disabled = true;
-
-  try {
-    if (editingTrigger !== null) {
-      await api("/api/replies", {
-        method: "POST",
-
-        body: JSON.stringify({
-          action: "edit",
-          oldTrigger: editingTrigger,
-          trigger,
-          response
-        })
+  <script>
+    let selectedGuildId = null;
+    let currentReplies = [];
+    let welcomeOptions = {
+      roles: [],
+      channels: []
+    };
+
+    const loginScreen = document.getElementById("loginScreen");
+    const dashboard = document.getElementById("dashboard");
+
+    const guildSelect = document.getElementById("guildSelect");
+    const serverStatus = document.getElementById("serverStatus");
+
+    // =====================================
+    // API HELPER
+    // =====================================
+
+    async function api(url, options) {
+      const response = await fetch(url, {
+        credentials: "same-origin",
+        ...(options || {})
       });
 
-      showReplyMessage("تم تعديل الرد بنجاح");
+      let data = {};
 
-    } else {
-      await api("/api/replies", {
-        method: "POST",
+      try {
+        data = await response.json();
+      } catch {
+        data = {};
+      }
 
-        body: JSON.stringify({
-          action: "add",
-          trigger,
-          response
-        })
+      if (response.status === 401) {
+        showLogin();
+        throw new Error("انتهت جلسة تسجيل الدخول");
+      }
+
+      if (!response.ok) {
+        throw new Error(
+          data.error || "حدث خطأ أثناء تنفيذ الطلب"
+        );
+      }
+
+      return data;
+    }
+
+    // =====================================
+    // LOGIN STATE
+    // =====================================
+
+    function showLogin() {
+      loginScreen.classList.remove("hidden");
+      dashboard.classList.add("hidden");
+    }
+
+    function showDashboard() {
+      loginScreen.classList.add("hidden");
+      dashboard.classList.remove("hidden");
+    }
+
+    async function loadDashboard() {
+      try {
+        const data = await api("/api/me");
+
+        if (!data.loggedIn) {
+          showLogin();
+          return;
+        }
+
+        document.getElementById("username").textContent =
+          data.user.username || "Discord User";
+
+        showDashboard();
+
+        await loadGuilds();
+
+      } catch (error) {
+        showLogin();
+      }
+    }
+
+    // =====================================
+    // NAVIGATION
+    // =====================================
+
+    document.querySelectorAll(".nav-btn").forEach(button => {
+      button.addEventListener("click", () => {
+        const panelName = button.dataset.panel;
+
+        document.querySelectorAll(".nav-btn").forEach(item => {
+          item.classList.remove("active");
+        });
+
+        document.querySelectorAll(".panel").forEach(panel => {
+          panel.classList.remove("active");
+        });
+
+        button.classList.add("active");
+
+        const panel = document.getElementById(
+          "panel-" + panelName
+        );
+
+        if (panel) panel.classList.add("active");
+
+        const titles = {
+          home: "الرئيسية",
+          replies: "الردود التلقائية",
+          welcome: "الترحيب والمغادرة"
+        };
+
+        document.getElementById("pageTitle").textContent =
+          titles[panelName] || "HERVIN";
       });
+    });
 
-      showReplyMessage("تمت إضافة الرد بنجاح");
+    // =====================================
+    // LOAD GUILDS
+    // =====================================
+
+    async function loadGuilds() {
+      try {
+        const data = await api("/api/guilds");
+
+        guildSelect.replaceChildren();
+
+        const defaultOption = document.createElement("option");
+
+        defaultOption.value = "";
+        defaultOption.textContent = "اختر السيرفر";
+
+        guildSelect.appendChild(defaultOption);
+
+        data.forEach(guild => {
+          const option = document.createElement("option");
+
+          option.value = guild.id;
+          option.textContent = guild.name;
+
+          guildSelect.appendChild(option);
+        });
+
+        const me = await api("/api/me");
+
+        if (
+          me.selectedGuild &&
+          data.some(item => item.id === me.selectedGuild.id)
+        ) {
+          guildSelect.value = me.selectedGuild.id;
+          selectedGuildId = me.selectedGuild.id;
+
+          serverStatus.textContent =
+            "السيرفر المحدد: " + me.selectedGuild.name;
+
+          await loadReplies();
+          await loadWelcomeSettings();
+
+        } else {
+          selectedGuildId = null;
+
+          serverStatus.textContent =
+            "لم يتم اختيار سيرفر بعد";
+
+          clearDashboardSettings();
+        }
+
+      } catch (error) {
+        serverStatus.textContent = error.message;
+      }
     }
 
-    triggerInput.value = "";
-    responseInput.value = "";
+    // =====================================
+    // SELECT SERVER
+    // =====================================
 
-    cancelReplyEdit();
+    guildSelect.addEventListener("change", async () => {
+      const guildId = guildSelect.value;
 
-    await loadReplies();
+      if (!guildId) {
+        selectedGuildId = null;
+        serverStatus.textContent = "لم يتم اختيار سيرفر";
+        clearDashboardSettings();
+        return;
+      }
 
-  } catch (error) {
-    showReplyMessage(error.message, true);
+      try {
+        const data = await api("/api/select-server", {
+          method: "POST",
 
-  } finally {
-    button.disabled = false;
-  }
-}
+          headers: {
+            "Content-Type": "application/json"
+          },
 
-// =====================================
-// EDIT REPLY
-// =====================================
+          body: JSON.stringify({
+            guildId
+          })
+        });
 
-function startReplyEdit(reply) {
-  editingTrigger = reply.trigger;
+        selectedGuildId = guildId;
 
-  document.getElementById("replyTrigger").value = reply.trigger;
+        serverStatus.textContent =
+          "السيرفر المحدد: " + data.selectedGuild.name;
 
-  document.getElementById("replyResponse").value = reply.response;
+        await loadReplies();
+        await loadWelcomeSettings();
 
-  document.getElementById("replySaveButton").textContent = "حفظ التعديل";
-
-  document.getElementById("replyCancelButton").classList.remove("hidden");
-
-  showReplyMessage("أنت الآن تعدل الرد المحدد");
-}
-
-function cancelReplyEdit() {
-  editingTrigger = null;
-
-  document.getElementById("replyTrigger").value = "";
-
-  document.getElementById("replyResponse").value = "";
-
-  document.getElementById("replySaveButton").textContent = "إضافة الرد";
-
-  document.getElementById("replyCancelButton").classList.add("hidden");
-}
-
-// =====================================
-// TOGGLE REPLY
-// =====================================
-
-async function toggleReply(reply) {
-  try {
-    await api("/api/replies", {
-      method: "POST",
-
-      body: JSON.stringify({
-        action: "toggle",
-        trigger: reply.trigger,
-        enabled: reply.enabled === false
-      })
+      } catch (error) {
+        selectedGuildId = null;
+        serverStatus.textContent = error.message;
+      }
     });
 
-    showReplyMessage("تم تحديث حالة الرد");
+    // =====================================
+    // CLEAR SETTINGS
+    // =====================================
 
-    await loadReplies();
+    function clearDashboardSettings() {
+      currentReplies = [];
 
-  } catch (error) {
-    showReplyMessage(error.message, true);
-  }
-}
+      document.getElementById("repliesList").replaceChildren();
 
-// =====================================
-// DELETE REPLY
-// =====================================
+      const empty = document.createElement("div");
+      empty.className = "empty-state";
+      empty.textContent = "اختر سيرفراً لعرض الردود";
 
-async function deleteReply(reply) {
-  const confirmed = confirm(
-    "هل أنت متأكد من حذف الرد: " + reply.trigger + " ؟"
-  );
+      document.getElementById("repliesList").appendChild(empty);
 
-  if (!confirmed) return;
+      welcomeOptions = {
+        roles: [],
+        channels: []
+      };
 
-  try {
-    await api("/api/replies", {
-      method: "POST",
-
-      body: JSON.stringify({
-        action: "delete",
-        trigger: reply.trigger
-      })
-    });
-
-    if (editingTrigger === reply.trigger) {
-      cancelReplyEdit();
+      clearWelcomeSelects();
     }
 
-    showReplyMessage("تم حذف الرد بنجاح");
+    function clearWelcomeSelects() {
+      const ids = [
+        "memberRoleId",
+        "botRoleId",
+        "welcomeChannelId",
+        "leaveChannelId",
+        "joinLogChannelId",
+        "leaveLogChannelId"
+      ];
 
-    await loadReplies();
+      ids.forEach(id => {
+        const element = document.getElementById(id);
+        if (!element) return;
 
-  } catch (error) {
-    showReplyMessage(error.message, true);
-  }
-}
+        element.replaceChildren();
 
-// =====================================
-// STATUS MESSAGE
-// =====================================
+        const option = document.createElement("option");
+        option.value = "";
+        option.textContent = "اختر السيرفر أولاً";
 
-function showReplyMessage(message, isError = false) {
-  const element = document.getElementById("replyMessage");
+        element.appendChild(option);
+      });
+    }
 
-  element.textContent = message;
+    // =====================================
+    // REPLIES MESSAGE
+    // =====================================
 
-  element.style.color = isError
-    ? "#ff8585"
-    : "#55dfa5";
-}
+    function showReplyMessage(message, type) {
+      const element = document.getElementById("repliesMessage");
 
-// =====================================
-// LOGOUT
-// =====================================
+      element.textContent = message;
+      element.className = "status-message " + type;
+    }
 
-async function logout() {
-  try {
-    await fetch("/auth/logout", {
-      method: "POST",
-      credentials: "same-origin"
-    });
-  } catch (error) {
-    console.error("Logout error:", error);
-  }
+    // =====================================
+    // LOAD REPLIES
+    // =====================================
 
-  window.location.href = "/";
-}
+    async function loadReplies() {
+      if (!selectedGuildId) return;
 
-// =====================================
-// START
-// =====================================
+      try {
+        const data = await api("/api/replies");
 
-loadDashboard();
+        currentReplies = Array.isArray(data.replies)
+          ? data.replies
+          : [];
 
-</script>
+        renderReplies();
+
+      } catch (error) {
+        showReplyMessage(error.message, "error");
+      }
+    }
+
+    // =====================================
+    // RENDER REPLIES
+    // =====================================
+
+    function renderReplies() {
+      const container = document.getElementById("repliesList");
+
+      container.replaceChildren();
+
+      if (!currentReplies.length) {
+        const empty = document.createElement("div");
+
+        empty.className = "empty-state";
+        empty.textContent = "لا توجد ردود تلقائية حالياً";
+
+        container.appendChild(empty);
+        return;
+      }
+
+      currentReplies.forEach(reply => {
+        const item = document.createElement("div");
+        item.className = "reply-item";
+
+        const header = document.createElement("div");
+        header.className = "reply-header";
+
+        const trigger = document.createElement("div");
+        trigger.className = "reply-trigger";
+        trigger.textContent = "كلمة التفعيل: " + reply.trigger;
+
+        const state = document.createElement("span");
+        state.textContent =
+          reply.enabled === false ? "معطل" : "مفعل";
+
+        state.style.color =
+          reply.enabled === false ? "#ff929c" : "#76e2b7";
+
+        header.appendChild(trigger);
+        header.appendChild(state);
+
+        const response = document.createElement("div");
+        response.className = "reply-response";
+        response.textContent = reply.response;
+
+        const actions = document.createElement("div");
+        actions.className = "reply-actions";
+
+        const editButton = document.createElement("button");
+        editButton.className = "secondary-btn";
+        editButton.textContent = "تعديل";
+
+        editButton.addEventListener("click", () => {
+          editReply(reply);
+        });
+
+        const toggleButton = document.createElement("button");
+
+        toggleButton.className =
+          reply.enabled === false
+            ? "success-btn"
+            : "secondary-btn";
+
+        toggleButton.textContent =
+          reply.enabled === false ? "تفعيل" : "تعطيل";
+
+        toggleButton.addEventListener("click", () => {
+          toggleReply(reply);
+        });
+
+        const deleteButton = document.createElement("button");
+        deleteButton.className = "danger-btn";
+        deleteButton.textContent = "حذف";
+
+        deleteButton.addEventListener("click", () => {
+          deleteReply(reply);
+        });
+
+        actions.appendChild(editButton);
+        actions.appendChild(toggleButton);
+        actions.appendChild(deleteButton);
+
+        item.appendChild(header);
+        item.appendChild(response);
+        item.appendChild(actions);
+
+        container.appendChild(item);
+      });
+    }
+
+    // =====================================
+    // ADD REPLY
+    // =====================================
+
+    document.getElementById("addReplyBtn").addEventListener(
+      "click",
+      async () => {
+        if (!selectedGuildId) {
+          showReplyMessage("اختر سيرفراً أولاً", "error");
+          return;
+        }
+
+        const trigger =
+          document.getElementById("replyTrigger").value.trim();
+
+        const response =
+          document.getElementById("replyResponse").value.trim();
+
+        if (!trigger || !response) {
+          showReplyMessage(
+            "اكتب كلمة التفعيل ونص الرد",
+            "error"
+          );
+          return;
+        }
+
+        try {
+          const data = await api("/api/replies", {
+            method: "POST",
+
+            headers: {
+              "Content-Type": "application/json"
+            },
+
+            body: JSON.stringify({
+              action: "add",
+              trigger,
+              response
+            })
+          });
+
+          currentReplies = data.replies;
+          renderReplies();
+
+          document.getElementById("replyTrigger").value = "";
+          document.getElementById("replyResponse").value = "";
+
+          showReplyMessage(data.message, "success");
+
+        } catch (error) {
+          showReplyMessage(error.message, "error");
+        }
+      }
+    );
+
+    // =====================================
+    // EDIT REPLY
+    // =====================================
+
+    async function editReply(reply) {
+      const newTrigger = prompt(
+        "اكتب كلمة التفعيل الجديدة:",
+        reply.trigger
+      );
+
+      if (newTrigger === null) return;
+
+      const newResponse = prompt(
+        "اكتب نص الرد الجديد:",
+        reply.response
+      );
+
+      if (newResponse === null) return;
+
+      if (!newTrigger.trim() || !newResponse.trim()) {
+        showReplyMessage("لا يمكن ترك الحقول فارغة", "error");
+        return;
+      }
+
+      try {
+        const data = await api("/api/replies", {
+          method: "POST",
+
+          headers: {
+            "Content-Type": "application/json"
+          },
+
+          body: JSON.stringify({
+            action: "edit",
+            oldTrigger: reply.trigger,
+            trigger: newTrigger.trim(),
+            response: newResponse.trim()
+          })
+        });
+
+        currentReplies = data.replies;
+        renderReplies();
+
+        showReplyMessage(data.message, "success");
+
+      } catch (error) {
+        showReplyMessage(error.message, "error");
+      }
+    }
+
+    // =====================================
+    // DELETE REPLY
+    // =====================================
+
+    async function deleteReply(reply) {
+      if (!confirm("هل أنت متأكد من حذف هذا الرد؟")) {
+        return;
+      }
+
+      try {
+        const data = await api("/api/replies", {
+          method: "POST",
+
+          headers: {
+            "Content-Type": "application/json"
+          },
+
+          body: JSON.stringify({
+            action: "delete",
+            trigger: reply.trigger
+          })
+        });
+
+        currentReplies = data.replies;
+        renderReplies();
+
+        showReplyMessage(data.message, "success");
+
+      } catch (error) {
+        showReplyMessage(error.message, "error");
+      }
+    }
+
+    // =====================================
+    // TOGGLE REPLY
+    // =====================================
+
+    async function toggleReply(reply) {
+      try {
+        const data = await api("/api/replies", {
+          method: "POST",
+
+          headers: {
+            "Content-Type": "application/json"
+          },
+
+          body: JSON.stringify({
+            action: "toggle",
+            trigger: reply.trigger,
+            enabled: reply.enabled === false
+          })
+        });
+
+        currentReplies = data.replies;
+        renderReplies();
+
+        showReplyMessage(data.message, "success");
+
+      } catch (error) {
+        showReplyMessage(error.message, "error");
+      }
+    }
+
+    // =====================================
+    // WELCOME STATUS
+    // =====================================
+
+    function showWelcomeMessage(message, type) {
+      const element = document.getElementById(
+        "welcomeMessageStatus"
+      );
+
+      element.textContent = message;
+      element.className = "status-message " + type;
+    }
+
+    // =====================================
+    // SELECT OPTIONS HELPER
+    // =====================================
+
+    function fillSelect(id, items, emptyText, getName) {
+      const select = document.getElementById(id);
+
+      select.replaceChildren();
+
+      const emptyOption = document.createElement("option");
+
+      emptyOption.value = "";
+      emptyOption.textContent = emptyText;
+
+      select.appendChild(emptyOption);
+
+      items.forEach(item => {
+        const option = document.createElement("option");
+
+        option.value = item.id;
+        option.textContent = getName(item);
+
+        select.appendChild(option);
+      });
+    }
+
+    // =====================================
+    // LOAD WELCOME OPTIONS
+    // =====================================
+
+    async function loadWelcomeOptions() {
+      const data = await api("/api/welcome-options");
+
+      welcomeOptions = {
+        roles: Array.isArray(data.roles) ? data.roles : [],
+        channels: Array.isArray(data.channels) ? data.channels : []
+      };
+
+      fillSelect(
+        "memberRoleId",
+        welcomeOptions.roles,
+        "بدون رتبة تلقائية",
+        item => item.name
+      );
+
+      fillSelect(
+        "botRoleId",
+        welcomeOptions.roles,
+        "بدون رتبة تلقائية",
+        item => item.name
+      );
+
+      fillSelect(
+        "welcomeChannelId",
+        welcomeOptions.channels,
+        "تعطيل رسالة الترحيب",
+        item => "#" + item.name
+      );
+
+      fillSelect(
+        "leaveChannelId",
+        welcomeOptions.channels,
+        "تعطيل رسالة المغادرة",
+        item => "#" + item.name
+      );
+
+      fillSelect(
+        "joinLogChannelId",
+        welcomeOptions.channels,
+        "بدون سجل دخول",
+        item => "#" + item.name
+      );
+
+      fillSelect(
+        "leaveLogChannelId",
+        welcomeOptions.channels,
+        "بدون سجل خروج",
+        item => "#" + item.name
+      );
+    }
+
+    // =====================================
+    // LOAD WELCOME SETTINGS
+    // =====================================
+
+    async function loadWelcomeSettings() {
+      if (!selectedGuildId) return;
+
+      try {
+        await loadWelcomeOptions();
+
+        const data = await api("/api/welcome-settings");
+        const settings = data.settings || {};
+
+        const fields = [
+          "memberRoleId",
+          "botRoleId",
+          "joinLogChannelId",
+          "leaveLogChannelId",
+          "welcomeChannelId",
+          "leaveChannelId"
+        ];
+
+        fields.forEach(id => {
+          document.getElementById(id).value =
+            settings[id] || "";
+        });
+
+        document.getElementById("welcomeMessage").value =
+          settings.welcomeMessage || "";
+
+        document.getElementById("leaveMessage").value =
+          settings.leaveMessage || "";
+
+      } catch (error) {
+        showWelcomeMessage(error.message, "error");
+      }
+    }
+
+    // =====================================
+    // SAVE WELCOME SETTINGS
+    // =====================================
+
+    document.getElementById("saveWelcomeBtn").addEventListener(
+      "click",
+      async () => {
+        if (!selectedGuildId) {
+          showWelcomeMessage("اختر سيرفراً أولاً", "error");
+          return;
+        }
+
+        const payload = {
+          memberRoleId:
+            document.getElementById("memberRoleId").value,
+
+          botRoleId:
+            document.getElementById("botRoleId").value,
+
+          joinLogChannelId:
+            document.getElementById("joinLogChannelId").value,
+
+          leaveLogChannelId:
+            document.getElementById("leaveLogChannelId").value,
+
+          welcomeChannelId:
+            document.getElementById("welcomeChannelId").value,
+
+          leaveChannelId:
+            document.getElementById("leaveChannelId").value,
+
+          welcomeMessage:
+            document.getElementById("welcomeMessage").value,
+
+          leaveMessage:
+            document.getElementById("leaveMessage").value
+        };
+
+        try {
+          const data = await api("/api/welcome-settings", {
+            method: "POST",
+
+            headers: {
+              "Content-Type": "application/json"
+            },
+
+            body: JSON.stringify(payload)
+          });
+
+          showWelcomeMessage(data.message, "success");
+
+        } catch (error) {
+          showWelcomeMessage(error.message, "error");
+        }
+      }
+    );
+
+    // =====================================
+    // LOGOUT
+    // =====================================
+
+    document.getElementById("logoutBtn").addEventListener(
+      "click",
+      async () => {
+        try {
+          await fetch("/auth/logout", {
+            method: "POST",
+            credentials: "same-origin"
+          });
+        } catch (error) {
+          console.error("Logout error:", error);
+        }
+
+        selectedGuildId = null;
+        window.location.reload();
+      }
+    );
+
+    // =====================================
+    // START DASHBOARD
+    // =====================================
+
+    loadDashboard();
+
+  </script>
 
 </body>
 </html>`);
@@ -2104,7 +2548,6 @@ app.post("/auth/logout", (req, res) => {
 
     if (match) {
       const sessionId = match[1].split(".")[0];
-
       sessions.delete(sessionId);
     }
   }
@@ -2115,7 +2558,8 @@ app.post("/auth/logout", (req, res) => {
   );
 
   res.json({
-    success: true
+    success: true,
+    message: "تم تسجيل الخروج"
   });
 });
 
@@ -2123,6 +2567,11 @@ app.post("/auth/logout", (req, res) => {
 // START SERVER
 // =====================================
 
-app.listen(process.env.PORT || 3000, "0.0.0.0", () => {
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, "0.0.0.0", () => {
+  console.log("=================================");
   console.log("HERVIN Dashboard is running");
+  console.log("Port:", PORT);
+  console.log("=================================");
 });
