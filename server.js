@@ -2,6 +2,9 @@
 const express = require("express");
 const app = express();
 
+// تشغيل بوت HERVIN مع لوحة التحكم
+require("./index");
+
 app.get("/", (req, res) => {
 res.send(`<!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -316,8 +319,6 @@ padding:25px;
 color:#77798c;
 }
 
-
-
 @media(max-width:650px){
 .header{height:60px;padding:0 9px}
 .logo{font-size:17px}
@@ -390,8 +391,6 @@ font-size:12px;
 
 footer{padding:15px;font-size:10px}
 }
-
-
 </style>
 </head>
 
@@ -632,4 +631,6 @@ document.getElementById("menu").classList.remove("show");
 </html>`);
 });
 
-app.listen(process.env.PORT || 3000, "0.0.0.0");
+app.listen(process.env.PORT || 3000, "0.0.0.0", () => {
+  console.log("HERVIN Dashboard is running");
+});
