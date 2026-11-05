@@ -316,24 +316,31 @@ padding:25px;
 color:#77798c;
 }
 
+
 @media(max-width:650px){
-.header{height:105px;padding:0 15px}
-.logo{font-size:23px}
-.icon-btn{width:55px;height:55px}
-.avatar{width:45px;height:45px}
-main{padding:15px 12px 40px}
-.section{padding:25px 20px;margin-bottom:25px}
-.section-head h2{font-size:25px}
-.section-head p{font-size:16px}
-.section-icon{width:65px;height:65px}
-.field label{font-size:18px}
-select,input{height:64px}
-.preview h3{font-size:18px}
-.preview p{font-size:16px}
-.stats{grid-template-columns:1fr}
-.page-title h1{font-size:23px}
-.status{font-size:11px}
+.header{height:75px;padding:0 12px}
+.logo{font-size:20px}
+.icon-btn{width:42px;height:42px}
+.avatar{width:36px;height:36px}
+main{padding:12px 10px 25px}
+.section{padding:16px 13px;margin-bottom:14px}
+.section-head{gap:10px;margin-bottom:16px}
+.section-head h2{font-size:18px}
+.section-head p{font-size:12px}
+.section-icon{width:43px;height:43px;font-size:19px}
+.field{margin-bottom:15px}
+.field label{font-size:14px;margin-bottom:8px}
+select,input{height:43px;font-size:14px}
+.preview{padding:12px}
+.preview h3{font-size:15px}
+.preview p{font-size:13px}
+.stats{grid-template-columns:repeat(2,1fr);gap:8px}
+.stat{padding:12px;border-radius:12px}
+.stat h2{font-size:19px}
+.page-title h1{font-size:20px}
+.status{font-size:10px}
 }
+
 </style>
 </head>
 
