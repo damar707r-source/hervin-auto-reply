@@ -11,37 +11,128 @@ const {
 const fs = require("fs");
 const path = require("path");
 
+// =====================================
+// HERVIN SYSTEMS
+// =====================================
+
 const tickets = require("./systems/tickets");
 const security = require("./systems/security");
 const welcome = require("./systems/welcome");
 const moderation = require("./systems/moderation");
 
+// =====================================
+// CONFIGURATION
+// =====================================
+
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 
 if (!TOKEN || !CLIENT_ID) {
-  console.error("Missing DISCORD_TOKEN or CLIENT_ID");
+  console.error("[HERVIN] Missing DISCORD_TOKEN or CLIENT_ID");
   process.exit(1);
 }
 
 const file = path.join(__dirname, "replies.json");
+const tempFile = file + ".tmp";
+
+const admin = PermissionFlagsBits.ManageGuild;
+
+// =====================================
+// AUTO REPLY STORAGE
+// =====================================
+
+let repliesCache = {};
 
 function load() {
   try {
-    return fs.existsSync(file)
-      ? JSON.parse(fs.readFileSync(file, "utf8"))
-      : {};
+    if (!fs.existsSync(file)) {
+      repliesCache = {};
+      return repliesCache;
+    }
+
+    const raw = fs.readFileSync(file, "utf8");
+    const data = JSON.parse(raw);
+
+    if (
+      !data ||
+      typeof data !== "object" ||
+      Array.isArray(data)
+    ) {
+      throw new Error("Invalid replies.json format");
+    }
+
+    repliesCache = data;
+    return repliesCache;
+
   } catch (error) {
-    console.error("Load error:", error);
-    return {};
+    console.error("[HERVIN] Replies load error:", error);
+
+    return repliesCache;
   }
 }
 
 function save(data) {
-  fs.writeFileSync(file, JSON.stringify(data, null, 2));
+  try {
+    const json = JSON.stringify(data, null, 2);
+
+    fs.writeFileSync(tempFile, json, "utf8");
+    fs.renameSync(tempFile, file);
+
+    repliesCache = data;
+
+    return true;
+
+  } catch (error) {
+    console.error("[HERVIN] Replies save error:", error);
+
+    try {
+      if (fs.existsSync(tempFile)) {
+        fs.unlinkSync(tempFile);
+      }
+    } catch {}
+
+    throw error;
+  }
 }
 
-const admin = PermissionFlagsBits.ManageGuild;
+// Load once when starting
+load();
+
+// =====================================
+// HELPERS
+// =====================================
+
+function getGuildReplies(guildId) {
+  const guildData = repliesCache[guildId];
+
+  if (
+    !guildData ||
+    typeof guildData !== "object" ||
+    Array.isArray(guildData)
+  ) {
+    return [];
+  }
+
+  return Object.values(guildData).filter(reply =>
+    reply &&
+    typeof reply.trigger === "string" &&
+    typeof reply.response === "string" &&
+    reply.trigger.trim().length > 0 &&
+    reply.response.trim().length > 0
+  );
+}
+
+function normalizeTrigger(trigger) {
+  return trigger.trim().toLowerCase();
+}
+
+function safeError(label, error) {
+  console.error(`[HERVIN] ${label}:`, error);
+}
+
+// =====================================
+// COMMANDS
+// =====================================
 
 const commands = [
   new SlashCommandBuilder()
@@ -58,10 +149,12 @@ const commands = [
     .addStringOption(o =>
       o.setName("trigger")
         .setDescription("Trigger word")
+        .setMaxLength(100)
         .setRequired(true))
     .addStringOption(o =>
       o.setName("response")
         .setDescription("Bot response")
+        .setMaxLength(1900)
         .setRequired(true))
     .setDefaultMemberPermissions(admin),
 
@@ -76,6 +169,7 @@ const commands = [
     .addStringOption(o =>
       o.setName("trigger")
         .setDescription("Trigger word")
+        .setMaxLength(100)
         .setRequired(true))
     .setDefaultMemberPermissions(admin),
 
@@ -85,6 +179,7 @@ const commands = [
     .addStringOption(o =>
       o.setName("trigger")
         .setDescription("Trigger word")
+        .setMaxLength(100)
         .setRequired(true))
     .setDefaultMemberPermissions(admin),
 
@@ -94,10 +189,12 @@ const commands = [
     .addStringOption(o =>
       o.setName("trigger")
         .setDescription("Existing trigger")
+        .setMaxLength(100)
         .setRequired(true))
     .addStringOption(o =>
       o.setName("response")
         .setDescription("New response")
+        .setMaxLength(1900)
         .setRequired(true))
     .setDefaultMemberPermissions(admin),
 
@@ -107,6 +204,7 @@ const commands = [
     .addStringOption(o =>
       o.setName("trigger")
         .setDescription("Trigger word")
+        .setMaxLength(100)
         .setRequired(true))
     .addBooleanOption(o =>
       o.setName("status")
@@ -115,13 +213,16 @@ const commands = [
     .setDefaultMemberPermissions(admin)
 ].map(command => command.toJSON());
 
-// تسجيل أوامر الأنظمة
+// Register system commands
 tickets.registerTicketCommands(commands);
 security.registerSecurityCommands(commands);
 welcome.registerWelcomeCommands(commands);
 moderation.registerModerationCommands(commands);
 
-// إنشاء البوت
+// =====================================
+// DISCORD CLIENT
+// =====================================
+
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -132,30 +233,78 @@ const client = new Client({
   ]
 });
 
-// تشغيل الأنظمة
+// =====================================
+// INITIALIZE SYSTEMS
+// =====================================
+
 security.initializeSecurity(client);
 welcome.initializeWelcome(client);
 
+// =====================================
+// READY
+// =====================================
+
 client.once("ready", () => {
-  console.log(`HERVIN Online: ${client.user.tag}`);
+  console.log("--------------------------------");
+  console.log(`HERVIN ONLINE: ${client.user.tag}`);
+  console.log(`Guilds: ${client.guilds.cache.size}`);
+  console.log("Auto Replies: READY");
+  console.log("Security: READY");
+  console.log("Welcome: READY");
+  console.log("Tickets: READY");
+  console.log("Moderation: READY");
+  console.log("--------------------------------");
 });
 
-// استقبال الأوامر والأزرار
+// =====================================
+// CLIENT ERROR HANDLING
+// =====================================
+
+client.on("error", error => {
+  safeError("Discord client error", error);
+});
+
+client.on("shardError", error => {
+  safeError("Discord shard error", error);
+});
+
+client.on("warn", warning => {
+  console.warn("[HERVIN WARNING]", warning);
+});
+
+// =====================================
+// INTERACTION HANDLER
+// =====================================
+
 client.on("interactionCreate", async interaction => {
   try {
-    // نظام الإشراف
-    if (await moderation.handleModerationInteraction(interaction)) return;
+    // MODERATION
 
-    // نظام الترحيب والمغادرة
-    if (await welcome.handleWelcomeInteraction(interaction)) return;
+    if (
+      await moderation.handleModerationInteraction(interaction)
+    ) return;
 
-    // نظام الحماية
-    if (await security.handleSecurityInteraction(interaction)) return;
+    // WELCOME
 
-    // نظام التذاكر
-    if (await tickets.handleTicketInteraction(interaction)) return;
+    if (
+      await welcome.handleWelcomeInteraction(interaction)
+    ) return;
+
+    // SECURITY
+
+    if (
+      await security.handleSecurityInteraction(interaction)
+    ) return;
+
+    // TICKETS
+
+    if (
+      await tickets.handleTicketInteraction(interaction)
+    ) return;
 
     if (!interaction.isChatInputCommand()) return;
+
+    // PING
 
     if (interaction.commandName === "ping") {
       return interaction.reply({
@@ -163,6 +312,8 @@ client.on("interactionCreate", async interaction => {
         ephemeral: true
       });
     }
+
+    // HELP
 
     if (interaction.commandName === "help") {
       return interaction.reply({
@@ -210,29 +361,71 @@ client.on("interactionCreate", async interaction => {
       });
     }
 
+    // PERMISSIONS
+
     if (!interaction.memberPermissions?.has(admin)) {
       return interaction.reply({
-        content: "تحتاج صلاحية Manage Server لاستخدام هذا الأمر",
+        content: "تحتاج صلاحية Manage Server لاستخدام هذا الأمر.",
         ephemeral: true
       });
     }
 
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({
+      ephemeral: true
+    });
 
     const guildId = interaction.guildId;
-    const data = load();
 
-    if (!data[guildId]) data[guildId] = {};
+    if (!guildId) {
+      return interaction.editReply(
+        "هذا الأمر متاح داخل السيرفر فقط."
+      );
+    }
 
-    const trigger = interaction.options.getString("trigger")?.trim();
-    const key = trigger?.toLowerCase();
+    const data = {
+      ...repliesCache
+    };
+
+    if (
+      !data[guildId] ||
+      typeof data[guildId] !== "object" ||
+      Array.isArray(data[guildId])
+    ) {
+      data[guildId] = {};
+    }
+
+    const trigger = interaction.options
+      .getString("trigger")?.trim();
+
+    const key = trigger
+      ? normalizeTrigger(trigger)
+      : null;
+
+    // =================================
+    // ADD REPLY
+    // =================================
 
     switch (interaction.commandName) {
-      case "addreply": {
-        const response = interaction.options.getString("response").trim();
 
-        if (!trigger || !response) {
-          return interaction.editReply("الكلمة والرد مطلوبان");
+      case "addreply": {
+        const response = interaction.options
+          .getString("response")?.trim();
+
+        if (
+          !trigger ||
+          !response ||
+          trigger.length > 100 ||
+          response.length > 1900
+        ) {
+          return interaction.editReply(
+            "الكلمة أو الرد غير صالح."
+          );
+        }
+
+        if (data[guildId][key]) {
+          return interaction.editReply(
+            "هذه الكلمة موجودة مسبقًا. استخدم /edit لتعديل الرد."
+          );
         }
 
         data[guildId][key] = {
@@ -242,36 +435,69 @@ client.on("interactionCreate", async interaction => {
         };
 
         save(data);
-        return interaction.editReply(`تمت إضافة الرد بنجاح ✅\n${trigger}`);
+
+        return interaction.editReply(
+          `تمت إضافة الرد بنجاح ✅\nالكلمة: ${trigger}`
+        );
       }
+
+      // =================================
+      // LIST REPLIES
+      // =================================
 
       case "listreplies": {
         const replies = Object.values(data[guildId]);
 
-        const output = replies.length
-          ? replies.map(r =>
-              `${r.enabled === false ? "🔴" : "🟢"} ${r.trigger} → ${r.response}`
-            ).join("\n")
-          : "لا توجد ردود محفوظة";
+        if (!replies.length) {
+          return interaction.editReply(
+            "لا توجد ردود محفوظة."
+          );
+        }
 
-        return interaction.editReply(output.slice(0, 1900));
+        const output = replies.map(reply =>
+          `${reply.enabled === false ? "🔴" : "🟢"} ` +
+          `${reply.trigger} → ${reply.response}`
+        ).join("\n");
+
+        return interaction.editReply(
+          output.length > 1900
+            ? output.slice(0, 1890) + "\n..."
+            : output
+        );
       }
+
+      // =================================
+      // REMOVE REPLY
+      // =================================
 
       case "removereply": {
         if (!data[guildId][key]) {
-          return interaction.editReply("الرد غير موجود");
+          return interaction.editReply(
+            "الرد غير موجود."
+          );
         }
 
         delete data[guildId][key];
+
         save(data);
 
-        return interaction.editReply("تم حذف الرد بنجاح ✅");
+        return interaction.editReply(
+          "تم حذف الرد بنجاح ✅"
+        );
       }
+
+      // =================================
+      // DISPLAY REPLY
+      // =================================
 
       case "display": {
         const reply = data[guildId][key];
 
-        if (!reply) return interaction.editReply("الرد غير موجود");
+        if (!reply) {
+          return interaction.editReply(
+            "الرد غير موجود."
+          );
+        }
 
         return interaction.editReply(
           `**الكلمة:** ${reply.trigger}\n` +
@@ -280,89 +506,195 @@ client.on("interactionCreate", async interaction => {
         );
       }
 
+      // =================================
+      // EDIT REPLY
+      // =================================
+
       case "edit": {
         const reply = data[guildId][key];
 
-        if (!reply) return interaction.editReply("الرد غير موجود");
+        if (!reply) {
+          return interaction.editReply(
+            "الرد غير موجود."
+          );
+        }
 
-        reply.response = interaction.options.getString("response").trim();
+        const response = interaction.options
+          .getString("response")?.trim();
+
+        if (!response || response.length > 1900) {
+          return interaction.editReply(
+            "الرد الجديد غير صالح."
+          );
+        }
+
+        reply.response = response;
+
         save(data);
 
-        return interaction.editReply("تم تعديل الاستجابة بنجاح ✅");
+        return interaction.editReply(
+          "تم تعديل الاستجابة بنجاح ✅"
+        );
       }
+
+      // =================================
+      // ENABLE / DISABLE
+      // =================================
 
       case "enabled": {
         const reply = data[guildId][key];
 
-        if (!reply) return interaction.editReply("الرد غير موجود");
+        if (!reply) {
+          return interaction.editReply(
+            "الرد غير موجود."
+          );
+        }
 
-        reply.enabled = interaction.options.getBoolean("status");
+        reply.enabled = interaction.options
+          .getBoolean("status");
+
         save(data);
 
         return interaction.editReply(
-          reply.enabled ? "تم تفعيل الرد 🟢" : "تم تعطيل الرد 🔴"
+          reply.enabled
+            ? "تم تفعيل الرد 🟢"
+            : "تم تعطيل الرد 🔴"
         );
       }
 
       default:
-        return interaction.editReply("الأمر غير معروف");
+        return interaction.editReply(
+          "الأمر غير معروف."
+        );
     }
-  } catch (error) {
-    console.error("Interaction error:", error);
 
-    const message = "حدث خطأ أثناء تنفيذ الأمر. راجع Logs.";
+  } catch (error) {
+    safeError("Interaction handler", error);
+
+    const errorMessage =
+      "حدث خطأ أثناء تنفيذ الأمر. راجع Logs.";
 
     try {
       if (interaction.deferred || interaction.replied) {
-        await interaction.editReply(message);
+        await interaction.editReply(errorMessage);
       } else if (interaction.isRepliable()) {
         await interaction.reply({
-          content: message,
+          content: errorMessage,
           ephemeral: true
         });
       }
     } catch (replyError) {
-      console.error(replyError);
+      safeError("Interaction response", replyError);
     }
   }
 });
 
-// الردود التلقائية
-client.on("messageCreate", async message => {
-  if (!message.guild || message.author.bot) return;
+// =====================================
+// AUTO REPLY SYSTEM
+// =====================================
 
+const processedMessages = new Set();
+
+client.on("messageCreate", async message => {
   try {
-    const data = load();
-    const replies = Object.values(data[message.guild.id] || {});
+    if (
+      !message.guild ||
+      message.author.bot ||
+      message.webhookId
+    ) {
+      return;
+    }
+
+    if (!message.content || !message.content.trim()) {
+      return;
+    }
+
+    // Prevent duplicate processing
+
+    if (processedMessages.has(message.id)) return;
+
+    processedMessages.add(message.id);
+
+    setTimeout(() => {
+      processedMessages.delete(message.id);
+    }, 30000);
+
+    const replies = getGuildReplies(message.guild.id);
+
+    if (!replies.length) return;
+
     const content = message.content.toLowerCase();
 
-    const match = replies.find(reply =>
-      reply.enabled !== false &&
-      content.includes(reply.trigger.toLowerCase())
+    // Longest triggers first
+
+    const sortedReplies = replies
+      .filter(reply => reply.enabled !== false)
+      .sort((a, b) =>
+        b.trigger.length - a.trigger.length
+      );
+
+    const match = sortedReplies.find(reply =>
+      content.includes(
+        normalizeTrigger(reply.trigger)
+      )
     );
 
-    if (match) {
-      await message.reply(match.response);
-    }
+    if (!match) return;
+
+    await message.reply({
+      content: match.response,
+      allowedMentions: {
+        parse: []
+      }
+    });
+
+    console.log(
+      `[HERVIN AUTO REPLY] ${message.guild.name}: ${match.trigger}`
+    );
+
   } catch (error) {
-    console.error("Auto reply error:", error);
+    safeError("Auto reply handler", error);
   }
 });
 
-// تشغيل البوت وتسجيل الأوامر
+// =====================================
+// START BOT
+// =====================================
+
 async function start() {
-  const rest = new REST({ version: "10" }).setToken(TOKEN);
+  try {
+    console.log("[HERVIN] Starting...");
 
-  await rest.put(
-    Routes.applicationCommands(CLIENT_ID),
-    { body: commands }
-  );
+    // Register commands
 
-  console.log("HERVIN commands registered");
+    const rest = new REST({
+      version: "10"
+    }).setToken(TOKEN);
 
-  await client.login(TOKEN);
+    await rest.put(
+      Routes.applicationCommands(CLIENT_ID),
+      {
+        body: commands
+      }
+    );
+
+    console.log("[HERVIN] Commands registered successfully.");
+
+    // Login
+
+    await client.login(TOKEN);
+
+  } catch (error) {
+    safeError("Startup", error);
+    throw error;
+  }
 }
 
+// =====================================
+// STARTUP
+// =====================================
+
 start().catch(error => {
-  console.error("Startup error:", error);
+  safeError("Fatal startup error", error);
+  process.exitCode = 1;
 });
