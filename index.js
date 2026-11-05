@@ -10,6 +10,7 @@ const {
 
 const fs = require("fs");
 const path = require("path");
+const tickets = require("./systems/tickets");
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
@@ -94,6 +95,9 @@ const commands = [
     .setDefaultMemberPermissions(admin)
 ].map(command => command.toJSON());
 
+// إضافة أوامر التذاكر
+tickets.registerTicketCommands(commands);
+
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -107,9 +111,12 @@ client.once("ready", () => {
 });
 
 client.on("interactionCreate", async interaction => {
-  if (!interaction.isChatInputCommand()) return;
-
   try {
+    // معالجة أوامر وأزرار التذاكر أولاً
+    if (await tickets.handleTicketInteraction(interaction)) return;
+
+    if (!interaction.isChatInputCommand()) return;
+
     if (interaction.commandName === "ping") {
       return interaction.reply({
         content: "HERVIN Online ✅",
@@ -127,7 +134,9 @@ client.on("interactionCreate", async interaction => {
           "`/removereply` - Delete reply\n" +
           "`/display` - Display reply\n" +
           "`/edit` - Edit reply\n" +
-          "`/enabled` - Enable or disable reply",
+          "`/enabled` - Enable or disable reply\n" +
+          "`/ticket-setup` - Setup tickets\n" +
+          "`/ticket-panel` - Send ticket panel",
         ephemeral: true
       });
     }
@@ -225,19 +234,23 @@ client.on("interactionCreate", async interaction => {
           reply.enabled ? "تم تفعيل الرد 🟢" : "تم تعطيل الرد 🔴"
         );
       }
-    }
 
-    return interaction.editReply("الأمر غير معروف");
+      default:
+        return interaction.editReply("الأمر غير معروف");
+    }
   } catch (error) {
-    console.error("Command error:", error);
+    console.error("Interaction error:", error);
 
     const message = "حدث خطأ أثناء تنفيذ الأمر. راجع Logs.";
 
     try {
       if (interaction.deferred || interaction.replied) {
         await interaction.editReply(message);
-      } else {
-        await interaction.reply({ content: message, ephemeral: true });
+      } else if (interaction.isRepliable()) {
+        await interaction.reply({
+          content: message,
+          ephemeral: true
+        });
       }
     } catch (replyError) {
       console.error(replyError);
@@ -274,7 +287,11 @@ async function start() {
     { body: commands }
   );
 
+  console.log("HERVIN commands registered");
+
   await client.login(TOKEN);
 }
 
-start().catch(console.error);
+start().catch(error => {
+  console.error("Startup error:", error);
+});
