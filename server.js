@@ -1,3 +1,4 @@
+
 const express = require("express");
 const crypto = require("crypto");
 const fs = require("fs");
@@ -5,6 +6,9 @@ const path = require("path");
 
 const app = express();
 app.use(express.json({ limit: "20kb" }));
+
+// تشغيل ملفات لوحة التحكم
+app.use(express.static(path.join(__dirname, "public")));
 
 // تشغيل بوت HERVIN
 require("./index");
@@ -1045,6 +1049,7 @@ app.post("/api/welcome-settings", requireGuild, async (req, res) => {
     });
   }
 });
+
 // =====================================
 // START HERVIN DASHBOARD
 // =====================================
