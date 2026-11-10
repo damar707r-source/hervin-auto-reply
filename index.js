@@ -1,4 +1,3 @@
-
 const {
   Client,
   GatewayIntentBits,
@@ -248,7 +247,7 @@ const commands = [
         .setRequired(true))
     .setDefaultMemberPermissions(admin)
 
-].map(command => command.toJSON());
+];
 
 // =====================================
 // REGISTER SYSTEM COMMANDS
@@ -260,6 +259,13 @@ welcome.registerWelcomeCommands(commands);
 moderation.registerModerationCommands(commands);
 dmBroadcast.registerDMCommands(commands);
 games.registerGameCommands(commands);
+
+// تحويل جميع الأوامر بعد إضافة أوامر الأنظمة والألعاب
+const commandData = commands.map(command =>
+  typeof command.toJSON === "function"
+    ? command.toJSON()
+    : command
+);
 
 // =====================================
 // DISCORD CLIENT
@@ -310,6 +316,18 @@ client.on("guildMemberAdd", async member => {
     await dmBroadcast.handleNewMember(member);
   } catch (error) {
     safeError("DM Welcome", error);
+  }
+});
+
+// =====================================
+// HERVIN GAMES TEXT COMMANDS
+// =====================================
+
+client.on("messageCreate", async message => {
+  try {
+    await games.handleGameMessage(message);
+  } catch (error) {
+    safeError("Games Message Handler", error);
   }
 });
 
@@ -383,7 +401,6 @@ client.on("interactionCreate", async interaction => {
       });
     }
 
-
     // HELP
 
     if (interaction.commandName === "help") {
@@ -451,7 +468,6 @@ client.on("interactionCreate", async interaction => {
         ephemeral: true
       });
     }
-
 
     // PERMISSIONS
 
@@ -689,7 +705,7 @@ async function start() {
     await rest.put(
       Routes.applicationCommands(CLIENT_ID),
       {
-        body: commands
+        body: commandData
       }
     );
 
