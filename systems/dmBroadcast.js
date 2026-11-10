@@ -14,7 +14,7 @@ const path = require("path");
 const DATA_FILE = path.join(__dirname, "dm-subscribers.json");
 const admin = PermissionFlagsBits.ManageGuild;
 
-let sendingGuilds = new Set();
+const sendingGuilds = new Set();
 
 function loadData() {
   try {
@@ -56,15 +56,22 @@ function saveData() {
 function getGuildData(guildId) {
   if (!data.guilds[guildId]) {
     data.guilds[guildId] = {
-      subscribers: []
+      subscribers: [],
+      welcomed: []
     };
   }
 
-  return data.guilds[guildId];
-}
+  const guild = data.guilds[guildId];
 
-function isSubscribed(guildId, userId) {
-  return getGuildData(guildId).subscribers.includes(userId);
+  if (!Array.isArray(guild.subscribers)) {
+    guild.subscribers = [];
+  }
+
+  if (!Array.isArray(guild.welcomed)) {
+    guild.welcomed = [];
+  }
+
+  return guild;
 }
 
 function subscribe(guildId, userId) {
@@ -115,6 +122,60 @@ function registerDMCommands(commands) {
   );
 }
 
+// =====================================
+// NEW MEMBER WELCOME DM
+// =====================================
+
+async function handleNewMember(member) {
+  if (!member || !member.guild || member.user.bot) return;
+
+  const guildId = member.guild.id;
+  const userId = member.id;
+
+  const guild = getGuildData(guildId);
+
+  if (guild.welcomed.includes(userId)) return;
+
+  // Save before sending to prevent duplicate attempts
+  guild.welcomed.push(userId);
+  saveData();
+
+  const embed = new EmbedBuilder()
+    .setColor(0x8B5CF6)
+    .setTitle("𝐇𝐄𝐑𝐕𝐈𝐍 | أهلاً بك ❤️")
+    .setDescription(
+      `هلا والله ${member.user.username} ❤️\n\n` +
+      "وجودك معنا في السيرفر يسعدنا، ونبي نشوف تفاعلك ومشاركاتك\n\n" +
+      "وجودك يصنع فرق في مجتمعنا 🔥\n\n" +
+      "لا تحرمنا من تفاعلك، ننتظرك!"
+    )
+    .setThumbnail(member.user.displayAvatarURL())
+    .setFooter({
+      text: "HERVIN | COMMUNITY"
+    })
+    .setTimestamp();
+
+  try {
+    await member.send({
+      embeds: [embed]
+    });
+
+    console.log(
+      `[HERVIN DM] Welcome sent to ${userId}`
+    );
+
+  } catch (error) {
+    console.log(
+      `[HERVIN DM] Could not send welcome to ${userId}:`,
+      error.code || error.message
+    );
+  }
+}
+
+// =====================================
+// INTERACTIONS
+// =====================================
+
 async function handleDMInteraction(interaction) {
   if (
     !interaction.isChatInputCommand() &&
@@ -122,8 +183,6 @@ async function handleDMInteraction(interaction) {
   ) {
     return false;
   }
-
-  // SUBSCRIBE BUTTON
 
   if (interaction.isButton()) {
     if (
@@ -144,11 +203,12 @@ async function handleDMInteraction(interaction) {
 
     const guildId = interaction.guildId;
     const userId = interaction.user.id;
+    const guild = getGuildData(guildId);
 
     if (interaction.customId === "hervin_dm_subscribe") {
-      if (isSubscribed(guildId, userId)) {
+      if (guild.subscribers.includes(userId)) {
         await interaction.reply({
-          content: "أنت مشترك بالفعل في رسائل HERVIN 🟢",
+          content: "أنت مشترك بالفعل 🟢",
           ephemeral: true
         });
       } else {
@@ -160,7 +220,7 @@ async function handleDMInteraction(interaction) {
         });
       }
     } else {
-      if (!isSubscribed(guildId, userId)) {
+      if (!guild.subscribers.includes(userId)) {
         await interaction.reply({
           content: "أنت غير مشترك حالياً.",
           ephemeral: true
@@ -209,8 +269,6 @@ async function handleDMInteraction(interaction) {
   const guildId = interaction.guildId;
   const guildData = getGuildData(guildId);
 
-  // CREATE PANEL
-
   if (interaction.commandName === "dm-panel") {
     const embed = new EmbedBuilder()
       .setColor(0x8B5CF6)
@@ -218,12 +276,8 @@ async function handleDMInteraction(interaction) {
       .setDescription(
         "اشترك لاستقبال إعلانات ورسائل HERVIN الخاصة\n\n" +
         "🟢 اضغط استقبال الرسائل للاشتراك\n" +
-        "🔴 اضغط إلغاء الاشتراك لإيقاف الرسائل\n\n" +
-        "يمكنك تغيير اختيارك في أي وقت"
-      )
-      .setFooter({
-        text: "HERVIN DM Broadcast"
-      });
+        "🔴 اضغط إلغاء الاشتراك لإيقاف الرسائل"
+      );
 
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder()
@@ -250,15 +304,16 @@ async function handleDMInteraction(interaction) {
     return true;
   }
 
-  // STATISTICS
-
   if (interaction.commandName === "dm-stats") {
     await interaction.reply({
       content:
-        `**HERVIN DM Statistics**\n\n` +
+        "**HERVIN DM Statistics**\n\n" +
         `المشتركون: ${guildData.subscribers.length}\n` +
+        `رسائل الترحيب المسجلة: ${guildData.welcomed.length}\n` +
         `حالة الإرسال: ${
-          sendingGuilds.has(guildId) ? "جارٍ الإرسال 🟡" : "متوقف 🟢"
+          sendingGuilds.has(guildId)
+            ? "جارٍ الإرسال 🟡"
+            : "متوقف 🟢"
         }`,
       ephemeral: true
     });
@@ -266,12 +321,10 @@ async function handleDMInteraction(interaction) {
     return true;
   }
 
-  // SEND ANNOUNCEMENT
-
   if (interaction.commandName === "dm-send") {
     if (sendingGuilds.has(guildId)) {
       await interaction.reply({
-        content: "هناك حملة إرسال تعمل حالياً في هذا السيرفر.",
+        content: "هناك حملة إرسال تعمل حالياً.",
         ephemeral: true
       });
 
@@ -318,9 +371,7 @@ async function handleDMInteraction(interaction) {
 
           await user.send({
             content: message,
-            allowedMentions: {
-              parse: []
-            }
+            allowedMentions: { parse: [] }
           });
 
           success++;
@@ -334,13 +385,14 @@ async function handleDMInteraction(interaction) {
           );
         }
 
-        // Gradual delivery
-        await new Promise(resolve => setTimeout(resolve, 1200));
+        await new Promise(resolve =>
+          setTimeout(resolve, 1200)
+        );
       }
 
       await interaction.editReply({
         content:
-          `**انتهت حملة HERVIN DM ✅**\n\n` +
+          "**انتهت حملة HERVIN DM ✅**\n\n" +
           `إجمالي المشتركين: ${subscribers.length}\n` +
           `تم الإرسال: ${success}\n` +
           `فشل الإرسال: ${failed}`
@@ -365,5 +417,6 @@ async function handleDMInteraction(interaction) {
 
 module.exports = {
   registerDMCommands,
-  handleDMInteraction
+  handleDMInteraction,
+  handleNewMember
 };
