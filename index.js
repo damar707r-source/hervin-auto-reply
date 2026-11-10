@@ -20,6 +20,7 @@ const security = require("./systems/security");
 const welcome = require("./systems/welcome");
 const moderation = require("./systems/moderation");
 const autoReplies = require("./systems/autoReplies");
+const dmBroadcast = require("./systems/dmBroadcast");
 
 // =====================================
 // CONFIGURATION
@@ -74,6 +75,10 @@ function getReplyId(guildId, trigger) {
   return `guild:${guildId}:${normalizeTrigger(trigger)}`;
 }
 
+// =====================================
+// LEGACY REPLIES MIGRATION
+// =====================================
+
 async function migrateLegacyReplies() {
   try {
     if (!fs.existsSync(file)) return;
@@ -93,7 +98,6 @@ async function migrateLegacyReplies() {
 
     for (const [guildId, guildData] of Object.entries(oldData)) {
 
-      // Legacy Discord guild IDs are numeric snowflakes
       if (!/^\d{17,20}$/.test(guildId)) continue;
 
       if (
@@ -244,11 +248,15 @@ const commands = [
     .setDefaultMemberPermissions(admin)
 ].map(command => command.toJSON());
 
-// Register system commands
+// =====================================
+// REGISTER SYSTEM COMMANDS
+// =====================================
+
 tickets.registerTicketCommands(commands);
 security.registerSecurityCommands(commands);
 welcome.registerWelcomeCommands(commands);
 moderation.registerModerationCommands(commands);
+dmBroadcast.registerDMCommands(commands);
 
 // =====================================
 // DISCORD CLIENT
@@ -285,7 +293,20 @@ client.once("ready", () => {
   console.log("Welcome: READY");
   console.log("Tickets: READY");
   console.log("Moderation: READY");
+  console.log("DM Broadcast: READY");
   console.log("--------------------------------");
+});
+
+// =====================================
+// NEW MEMBER DM WELCOME
+// =====================================
+
+client.on("guildMemberAdd", async member => {
+  try {
+    await dmBroadcast.handleNewMember(member);
+  } catch (error) {
+    safeError("DM Welcome", error);
+  }
 });
 
 // =====================================
@@ -310,6 +331,13 @@ client.on("warn", warning => {
 
 client.on("interactionCreate", async interaction => {
   try {
+
+    // DM BROADCAST
+
+    if (
+      await dmBroadcast.handleDMInteraction(interaction)
+    ) return;
+
     // MODERATION
 
     if (
@@ -387,7 +415,12 @@ client.on("interactionCreate", async interaction => {
           "`/timeout` - Timeout member\n" +
           "`/warn` - Warn member\n" +
           "`/warnings` - Show warnings\n" +
-          "`/clear` - Clear messages",
+          "`/clear` - Clear messages\n\n" +
+
+          "**DM Broadcast**\n" +
+          "`/dm-panel` - Create DM subscription panel\n" +
+          "`/dm-send` - Send DM announcement to subscribers\n" +
+          "`/dm-stats` - DM statistics",
 
         ephemeral: true
       });
@@ -640,10 +673,7 @@ async function start() {
   try {
     console.log("[HERVIN] Starting...");
 
-    // Migrate old automatic replies
     await migrateLegacyReplies();
-
-    // Register commands
 
     const rest = new REST({
       version: "10"
@@ -657,8 +687,6 @@ async function start() {
     );
 
     console.log("[HERVIN] Commands registered successfully.");
-
-    // Login
 
     await client.login(TOKEN);
 
