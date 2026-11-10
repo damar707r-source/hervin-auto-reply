@@ -383,71 +383,75 @@ client.on("interactionCreate", async interaction => {
       });
     }
 
+
     // HELP
 
     if (interaction.commandName === "help") {
       return interaction.reply({
         content:
-          "**𝐇𝐄𝐑𝐕𝐈𝐍 Commands**\n\n" +
+          "**𝐇𝐄𝐑𝐕𝐈𝐍 | قائمة الأوامر**\n\n" +
 
-          "**General**\n" +
-          "`/ping` - Bot status\n" +
-          "`/help` - Commands list\n\n" +
+          "**الأوامر العامة**\n" +
+          "`/ping` - التحقق من حالة البوت\n" +
+          "`/help` - عرض قائمة الأوامر\n\n" +
 
-          "**Auto Replies**\n" +
-          "`/addreply` - Add reply\n" +
-          "`/listreplies` - List replies\n" +
-          "`/removereply` - Delete reply\n" +
-          "`/display` - Display reply\n" +
-          "`/edit` - Edit reply\n" +
-          "`/enabled` - Enable or disable reply\n\n" +
+          "**الردود التلقائية**\n" +
+          "`/addreply` - إضافة رد تلقائي\n" +
+          "`/listreplies` - عرض جميع الردود\n" +
+          "`/removereply` - حذف رد تلقائي\n" +
+          "`/display` - عرض تفاصيل الرد\n" +
+          "`/edit` - تعديل رد تلقائي\n" +
+          "`/enabled` - تفعيل أو تعطيل رد\n\n" +
 
-          "**Tickets**\n" +
-          "`/ticket-setup` - Setup tickets\n" +
-          "`/ticket-panel` - Send ticket panel\n" +
-          "`/ticket-add` - Add member\n" +
-          "`/ticket-remove` - Remove member\n" +
-          "`/ticket-transcript` - Create transcript\n\n" +
+          "**نظام التذاكر**\n" +
+          "`/ticket-setup` - إعداد نظام التذاكر\n" +
+          "`/ticket-panel` - إرسال لوحة التذاكر\n" +
+          "`/ticket-add` - إضافة عضو إلى التذكرة\n" +
+          "`/ticket-remove` - إزالة عضو من التذكرة\n" +
+          "`/ticket-transcript` - استخراج نسخة من المحادثة\n\n" +
 
-          "**Security**\n" +
-          "`/security-setup` - Setup security\n" +
-          "`/security-status` - Security status\n\n" +
+          "**نظام الحماية**\n" +
+          "`/security-setup` - إعداد نظام الحماية\n" +
+          "`/security-status` - عرض حالة الحماية\n\n" +
 
-          "**Welcome System**\n" +
-          "`/welcome-setup` - Setup welcome messages\n" +
-          "`/leave-setup` - Setup leave messages\n" +
-          "`/welcome-status` - Welcome settings\n\n" +
+          "**نظام الترحيب والمغادرة**\n" +
+          "`/welcome-setup` - إعداد رسائل الترحيب\n" +
+          "`/leave-setup` - إعداد رسائل المغادرة\n" +
+          "`/welcome-status` - عرض إعدادات الترحيب\n\n" +
 
-          "**Moderation System**\n" +
-          "`/ban` - Ban member\n" +
-          "`/unban` - Unban member\n" +
-          "`/kick` - Kick member\n" +
-          "`/timeout` - Timeout member\n" +
-          "`/warn` - Warn member\n" +
-          "`/warnings` - Show warnings\n" +
-          "`/clear` - Clear messages\n\n" +
+          "**نظام الإدارة والإشراف**\n" +
+          "`/ban` - حظر عضو من السيرفر\n" +
+          "`/unban` - فك حظر عضو\n" +
+          "`/kick` - طرد عضو من السيرفر\n" +
+          "`/timeout` - إسكات عضو مؤقتًا\n" +
+          "`/warn` - إعطاء إنذار لعضو\n" +
+          "`/warnings` - عرض إنذارات العضو\n" +
+          "`/clear` - حذف عدد من الرسائل\n\n" +
 
-          "**DM Broadcast**\n" +
-          "`/dm-panel` - Create DM subscription panel\n" +
-          "`/dm-send` - Send DM announcement to subscribers\n" +
-          "`/dm-stats` - DM statistics\n\n" +
+          "**نظام الرسائل الخاصة**\n" +
+          "`/dm-panel` - إنشاء لوحة الاشتراك بالرسائل\n" +
+          "`/dm-send` - إرسال رسالة للمشتركين\n" +
+          "`/dm-stats` - عرض إحصائيات المشتركين\n\n" +
 
-          "**HERVIN GAMES**\n" +
-          "`/balance` - View balance\n" +
-          "`/daily` - Daily reward\n" +
-          "`/work` - Earn points\n" +
-          "`/leaderboard` - Server leaderboard\n" +
-          "`/roulette` - Roulette game\n" +
-          "`/blackjack` - Blackjack game\n" +
-          "`/slots` - Slots game\n" +
-          "`/dice` - Dice game\n" +
-          "`/rps` - Rock Paper Scissors\n" +
-          "`/guess` - Guess the number\n" +
-          "`/xo` - Tic Tac Toe",
+          "**𝐇𝐄𝐑𝐕𝐈𝐍 GAMES | الألعاب**\n" +
+          "`/balance` - عرض رصيدك من النقاط\n" +
+          "`/daily` - استلام المكافأة اليومية\n" +
+          "`/work` - العمل وجمع النقاط\n" +
+          "`/leaderboard` - عرض ترتيب أغنى الأعضاء\n" +
+          "`/roulette` - لعبة الروليت\n" +
+          "`/blackjack` - لعبة البلاك جاك\n" +
+          "`/slots` - لعبة السلوت\n" +
+          "`/dice` - لعبة النرد\n" +
+          "`/rps` - حجر ورقة مقص\n" +
+          "`/guess` - لعبة تخمين الرقم\n" +
+          "`/xo` - لعبة إكس أو\n\n" +
+
+          "✦ جميع الحقوق محفوظة لـ 𝐇𝐄𝐑𝐕𝐈𝐍",
 
         ephemeral: true
       });
     }
+
 
     // PERMISSIONS
 
