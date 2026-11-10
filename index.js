@@ -21,6 +21,7 @@ const welcome = require("./systems/welcome");
 const moderation = require("./systems/moderation");
 const autoReplies = require("./systems/autoReplies");
 const dmBroadcast = require("./systems/dmBroadcast");
+const games = require("./systems/games");
 
 // =====================================
 // CONFIGURATION
@@ -246,6 +247,7 @@ const commands = [
         .setDescription("True = enabled, False = disabled")
         .setRequired(true))
     .setDefaultMemberPermissions(admin)
+
 ].map(command => command.toJSON());
 
 // =====================================
@@ -257,6 +259,7 @@ security.registerSecurityCommands(commands);
 welcome.registerWelcomeCommands(commands);
 moderation.registerModerationCommands(commands);
 dmBroadcast.registerDMCommands(commands);
+games.registerGameCommands(commands);
 
 // =====================================
 // DISCORD CLIENT
@@ -294,6 +297,7 @@ client.once("ready", () => {
   console.log("Tickets: READY");
   console.log("Moderation: READY");
   console.log("DM Broadcast: READY");
+  console.log("HERVIN GAMES: READY");
   console.log("--------------------------------");
 });
 
@@ -331,6 +335,12 @@ client.on("warn", warning => {
 
 client.on("interactionCreate", async interaction => {
   try {
+
+    // HERVIN GAMES
+
+    if (
+      await games.handleGameInteraction(interaction)
+    ) return;
 
     // DM BROADCAST
 
@@ -420,7 +430,20 @@ client.on("interactionCreate", async interaction => {
           "**DM Broadcast**\n" +
           "`/dm-panel` - Create DM subscription panel\n" +
           "`/dm-send` - Send DM announcement to subscribers\n" +
-          "`/dm-stats` - DM statistics",
+          "`/dm-stats` - DM statistics\n\n" +
+
+          "**HERVIN GAMES**\n" +
+          "`/balance` - View balance\n" +
+          "`/daily` - Daily reward\n" +
+          "`/work` - Earn points\n" +
+          "`/leaderboard` - Server leaderboard\n" +
+          "`/roulette` - Roulette game\n" +
+          "`/blackjack` - Blackjack game\n" +
+          "`/slots` - Slots game\n" +
+          "`/dice` - Dice game\n" +
+          "`/rps` - Rock Paper Scissors\n" +
+          "`/guess` - Guess the number\n" +
+          "`/xo` - Tic Tac Toe",
 
         ephemeral: true
       });
@@ -458,7 +481,7 @@ client.on("interactionCreate", async interaction => {
       : null;
 
     // =================================
-    // ADD REPLY
+    // AUTO REPLY COMMANDS
     // =================================
 
     switch (interaction.commandName) {
@@ -507,10 +530,6 @@ client.on("interactionCreate", async interaction => {
         );
       }
 
-      // =================================
-      // LIST REPLIES
-      // =================================
-
       case "listreplies": {
         const replies = getGuildReplies(guildId);
 
@@ -542,10 +561,6 @@ client.on("interactionCreate", async interaction => {
         );
       }
 
-      // =================================
-      // REMOVE REPLY
-      // =================================
-
       case "removereply": {
         if (!reply) {
           return interaction.editReply(
@@ -559,10 +574,6 @@ client.on("interactionCreate", async interaction => {
           "تم حذف الرد بنجاح ✅"
         );
       }
-
-      // =================================
-      // DISPLAY REPLY
-      // =================================
 
       case "display": {
         if (!reply) {
@@ -583,10 +594,6 @@ client.on("interactionCreate", async interaction => {
           `**الحالة:** ${reply.enabled === false ? "معطل 🔴" : "مفعل 🟢"}`
         );
       }
-
-      // =================================
-      // EDIT REPLY
-      // =================================
 
       case "edit": {
         if (!reply) {
@@ -611,10 +618,6 @@ client.on("interactionCreate", async interaction => {
           "تم تعديل الاستجابة بنجاح ✅"
         );
       }
-
-      // =================================
-      // ENABLE / DISABLE
-      // =================================
 
       case "enabled": {
         if (!reply) {
